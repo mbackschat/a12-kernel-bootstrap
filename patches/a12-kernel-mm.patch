@@ -1,0 +1,75 @@
+diff --git i/build-logic/src/main/kotlin/buildlogic/mm/mm-dmjsons-conventions.gradle.kts w/build-logic/src/main/kotlin/buildlogic/mm/mm-dmjsons-conventions.gradle.kts
+index 222d2a4..8f2fc48 100644
+--- i/build-logic/src/main/kotlin/buildlogic/mm/mm-dmjsons-conventions.gradle.kts
++++ w/build-logic/src/main/kotlin/buildlogic/mm/mm-dmjsons-conventions.gradle.kts
+@@ -178,7 +178,11 @@ tasks.matching {
+ }
+ 
+ // tests are shared across all mmdmjsons subprojects, in the :test-mmdmjsons subproject
+-evaluationDependsOn(":test-mmdmjsons")
++// OSS-build patch (B1): the eager evaluationDependsOn force-evaluated :test-mmdmjsons mid-apply, whose own
++// evaluationDependsOn(":mmdmjsons:…mm_field-1-a12") then pre-evaluated that synthetic subproject before the
++// root subprojects{} loop applied maven-publish to it → "Cannot run afterEvaluate when already evaluated".
++// The :test-* projects sort after the :mm* projects, so natural config order evaluates them last; the lazy
++// task dependsOn below needs no eager evaluation. (Was: evaluationDependsOn(":test-mmdmjsons"))
+ tasks.matching { it.name.equals("test") }.configureEach {
+     dependsOn(":test-mmdmjsons:test")
+ }
+diff --git i/build-logic/src/main/kotlin/buildlogic/mm/mm-typings-conventions.gradle.kts w/build-logic/src/main/kotlin/buildlogic/mm/mm-typings-conventions.gradle.kts
+index 5b85958..5d87399 100644
+--- i/build-logic/src/main/kotlin/buildlogic/mm/mm-typings-conventions.gradle.kts
++++ w/build-logic/src/main/kotlin/buildlogic/mm/mm-typings-conventions.gradle.kts
+@@ -72,7 +72,11 @@ dependencies {
+     typingsGenerator("com.mgmtp.a12.kernel:kernel-md-typed-accessor-gen:$currentKernelVersion")
+ }
+ 
+-evaluationDependsOn(":test-mmtypings") // not sure if we strictly need this evaluationDependsOn dependency
++// OSS-build patch (B1): the eager evaluationDependsOn force-evaluated :test-mmtypings mid-apply, which
++// (via its own evaluationDependsOn chain) pre-evaluated a synthetic mm* subproject before the root
++// subprojects{} loop applied maven-publish to it → "Cannot run afterEvaluate when already evaluated".
++// The :test-* projects sort after the :mm* projects, so natural config order evaluates them last; the
++// lazy task dependsOn below needs no eager evaluation. (Was: evaluationDependsOn(":test-mmtypings"))
+ tasks.matching { it.name.equals("test") }.configureEach {
+     dependsOn(":test-mmtypings:test")
+ }
+diff --git i/build-logic/src/main/kotlin/buildlogic/mm/mm-validators-conventions.gradle.kts w/build-logic/src/main/kotlin/buildlogic/mm/mm-validators-conventions.gradle.kts
+index c24380e..8ebd592 100644
+--- i/build-logic/src/main/kotlin/buildlogic/mm/mm-validators-conventions.gradle.kts
++++ w/build-logic/src/main/kotlin/buildlogic/mm/mm-validators-conventions.gradle.kts
+@@ -63,12 +63,19 @@ dependencies {
+     generateValidatorsConfig("com.mgmtp.a12.kernel:kernel-md-model:$kernelVersion") {
+         if (System.getenv("A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION")?.toBoolean() == true) {
+             exclude(group = "com.mgmtp.a12.kernel", module = "kernel-mm_common-codegen-v2")
++            // OSS-build: the mm_common validators artifact is named differently in this export; the line above
++            // doesn't match it, so the bootstrap seed still demanded mm_common. Exclude the actual artifact id too.
++            exclude(group = "com.mgmtp.a12.kernel", module = "mmvalidators-extmpinternal-mm_common-v2-codegen")
+         }
+     }
+ }
+ 
+ // tests are shared accross all mmvalidators subprojects -> don't test here, but depend on :test-mmvalidators:test
+-evaluationDependsOn(":test-mmvalidators")
++// OSS-build patch (B1): the eager evaluationDependsOn force-evaluated :test-mmvalidators mid-apply, pre-evaluating
++// a synthetic mm* subproject before the root subprojects{} loop applied maven-publish to it → "Cannot run
++// afterEvaluate when already evaluated". The :test-* projects sort after the :mm* projects, so natural config
++// order evaluates them last; the lazy task dependsOn below needs no eager evaluation.
++// (Was: evaluationDependsOn(":test-mmvalidators"))
+ tasks.matching { it.name.equals("test") }.configureEach {
+     dependsOn(":test-mmvalidators:test")
+ }
+diff --git i/libs.versions.toml w/libs.versions.toml
+index 5cffc14..fcca6b9 100644
+--- i/libs.versions.toml
++++ w/libs.versions.toml
+@@ -1,9 +1,9 @@
+ [versions]
+ extVersion = "54"
+-currentKernelVersion = "30.8.0" # If changed you have also to adapt the kernel-core-runtime artifactId!!!. Additionally, minKernelCoreRuntimeApiVersion _should_ be updated to match the version that is transitively referenced by the core-runtime of currentKernelVersion
++currentKernelVersion = "30.8.1" # OSS-build: aligned to this kernel checkout (was 30.8.0); artifactId stays 30-8. If changed you have also to adapt the kernel-core-runtime artifactId!!!. Additionally, minKernelCoreRuntimeApiVersion _should_ be updated to match the version that is transitively referenced by the core-runtime of currentKernelVersion
+ minKernelCoreRuntimeApiVersion = "32.3.4" # actual version will/may be higher if the runtime depends on a higher version. we just need to specify _some_ (effectively minimum) version because cyclonedx will otherwise fail
+ kernelRuntimeArtifactId = "30-8"
+-com-mgmtp-a12-base = "29.0.1"
++com-mgmtp-a12-base = "29.3.0" # OSS-build: aligned to the a12-base version published to mavenLocal (was 29.0.1)
+ org-junit-jupiter = "5.11.4"
+ org-junit-platform = "1.11.4"
+ 
