@@ -42,6 +42,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_VERSION=29.3.0     # the a12-base version the kernel pins (publish under this)
 KERNEL_VERSION=30.8.1   # kernel version published (consumers pin this in their own build)
 
+# Source pins — the exact PUBLIC commits the Release 2025.06-ext5 line was cut from (tips of the
+# `release/2025.06` branch on $GITHUB_ORG_URL). Pin by SHA, not by branch, so a moving upstream can never
+# drift the bootstrap: a12-kernel-mm.patch is generated against these exact trees, and an unpinned clone of
+# the advanced default branch is exactly what makes apply_mm_patch fail. Override via env for another line.
+: "${A12_KERNEL_REF:=cb66e51fa7ab90b650698f861bf670754e2e1e66}"    # a12-kernel     Release 2025.06-ext5 - 30.8.1
+: "${A12_BASE_REF:=1023b759287e6fdfd55bdc72a1629df21c8e51b8}"      # a12-base       Release 2025.06-ext5 - 29.3.0
+: "${A12_MM_REF:=d4ec70fcd80f89a6d84071e085a990a9884e38ef}"        # a12-kernel-mm  Release 2025.06-ext5 metamodels
+: "${A12_DEVTOOLS_REF:=38066e2008ab8c11a0a7d4d600de29939b0fcdc6}"  # a12-devtools   release/2025.06 tip
+
 # On any non-zero exit, hint that it may be a version mismatch (a freshly cloned repo may have moved
 # past these pins). Harmless on success (rc 0).
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then
@@ -117,17 +126,21 @@ g(){ JAVA_HOME="$JAVA21_HOME" GRADLE_USER_HOME="$A12_GRADLE_USER_HOME" \
        "$GRADLE_BIN" --no-daemon --console=plain --no-configuration-cache "$@"; }
 
 # ----------------------------- 1. clone -----------------------------
-clone_one(){ # <dir> <repo-name>
-  local dir="$1" name="$2"
+clone_one(){ # <dir> <repo-name> <ref>
+  local dir="$1" name="$2" ref="$3"
+  # Existing checkouts are left untouched (idempotent) — a maintainer's local siblings may sit at their own
+  # working refs; the pin only governs a FRESH clone (e.g. CI), where drift off the release line is the bug.
   if [ -d "$dir/.git" ]; then echo "  present: $name ($dir)"; return; fi
-  log "Cloning $name -> $dir"; git clone "$GITHUB_ORG_URL/$name.git" "$dir"
+  log "Cloning $name @ $ref -> $dir"
+  git clone "$GITHUB_ORG_URL/$name.git" "$dir"     # full clone: fetches every branch, so $ref is reachable
+  git -C "$dir" checkout --quiet --detach "$ref"   # pin to the exact release commit (deterministic)
 }
 if [ "$DO_CLONE" = 1 ]; then
   log "Clone (missing) sibling repos from $GITHUB_ORG_URL"
-  clone_one "$A12_KERNEL_DIR" a12-kernel
-  clone_one "$A12_BASE_DIR" a12-base
-  clone_one "$A12_MM_DIR" a12-kernel-mm
-  clone_one "$A12_DEVTOOLS_DIR" a12-devtools
+  clone_one "$A12_KERNEL_DIR" a12-kernel "$A12_KERNEL_REF"
+  clone_one "$A12_BASE_DIR" a12-base "$A12_BASE_REF"
+  clone_one "$A12_MM_DIR" a12-kernel-mm "$A12_MM_REF"
+  clone_one "$A12_DEVTOOLS_DIR" a12-devtools "$A12_DEVTOOLS_REF"
 fi
 
 # ----------------------------- 2. patch -----------------------------
