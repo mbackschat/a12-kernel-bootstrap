@@ -1,0 +1,26 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+group = 'com.mgmtp.a12.dataservices.wcf'
+version = '1.1.3'
+def upstream = new File(System.getenv('A12_WCF_DIR'))
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+sourceSets {
+    main.java.srcDir new File(upstream, 'dataservices-wcf-api/src/main/java')
+    test.java.srcDir new File(upstream, 'dataservices-wcf-api/src/test/java')
+    test.resources.srcDir new File(upstream, 'dataservices-wcf-api/src/test/resources')
+}
+dependencies {
+    api libs.mgmModelApi
+    api libs.commonsLang3
+    implementation libs.springContext
+    compileOnly libs.lombok
+    annotationProcessor libs.lombok
+    testImplementation libs.testng
+}
+test { useTestNG() }
+tasks.withType(Jar).configureEach {
+    from(upstream) { include 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES', 'licenses/**'; into 'META-INF' }
+}
+publishing { publications { maven(MavenPublication) { from components.java } } }

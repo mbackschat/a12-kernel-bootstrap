@@ -1,0 +1,8 @@
+plugins { id 'application' }
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+application { mainClass = 'ReleaseSmoke' }
+dependencies {
+    implementation 'com.mgmtp.a12.kernel:kernel-md-facade:31.1.1'
+    implementation 'com.mgmtp.a12.kernel:kernel-md-workspace-converter:31.1.1'
+    implementation 'com.mgmtp.a12.dataservices.wcf:dataservices-wcf-api:1.1.3'
+}

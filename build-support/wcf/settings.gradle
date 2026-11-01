@@ -1,0 +1,6 @@
+rootProject.name = 'dataservices-wcf-api'
+dependencyResolutionManagement {
+    versionCatalogs {
+        libs { from(files("${System.getenv('A12_WCF_DIR')}/gradle/libs.versions.toml")) }
+    }
+}

@@ -1,0 +1,20 @@
+// Keep documentation errors fatal and link to the matching JDK documentation
+// using its locally generated module/package index, without a network request.
+gradle.projectsEvaluated {
+    allprojects {
+        tasks.withType(Javadoc).configureEach {
+            failOnError = true
+            options.tags = (options.tags ?: []) + [
+                'apiNote:a:API Note:',
+                'implSpec:a:Implementation Requirements:',
+                'implNote:a:Implementation Note:'
+            ]
+            def major = javadocTool.get().metadata.languageVersion.asInt()
+            def index = new File(System.getenv('A12_JAVADOC_DIR'), major.toString())
+            inputs.file(new File(index, 'element-list'))
+            options.links = []
+            options.addBooleanOption('-no-platform-links', true)
+            options.linksOffline("https://docs.oracle.com/en/java/javase/${major}/docs/api/", index.toString())
+        }
+    }
+}

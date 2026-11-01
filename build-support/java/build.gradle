@@ -1,0 +1,153 @@
+import groovy.json.JsonSlurper
+import buildlogic.mm.MmCatalog
+import buildlogic.mm.UtilsKt
+
+buildscript {
+    dependencies {
+        classpath files("${System.getenv('A12_MM_DIR')}/build-logic/build/libs/build-logic.jar")
+        classpath 'com.fasterxml.jackson.core:jackson-databind:2.17.3'
+    }
+}
+
+def kernel = new File(System.getenv('A12_KERNEL_DIR'))
+def mm = new File(System.getenv('A12_MM_DIR'))
+def specs = new JsonSlurper().parse(file('metamodels.json'))
+def typingConfigs = MmCatalog.INSTANCE.typingsProjConfigs(mm)
+def validatorConfigs = MmCatalog.INSTANCE.validatorsProjConfigs(mm)
+def jsonConfigs = MmCatalog.INSTANCE.dmjsonsProjConfigs(mm)
+
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+    group = 'com.mgmtp.a12.kernel'
+    java {
+        toolchain { languageVersion = JavaLanguageVersion.of(21) }
+        withSourcesJar()
+        withJavadocJar()
+    }
+    // Match the exported metamodel Java conventions, including documentation
+    // handling for descriptions copied verbatim from the model files.
+    tasks.withType(Javadoc).configureEach {
+        failOnError = false
+        options.quiet()
+        options.addBooleanOption('Xdoclint:none', true)
+    }
+    tasks.withType(AbstractArchiveTask).configureEach {
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
+    }
+    // Keep upstream licensing with each generated artifact.
+    tasks.withType(Jar).configureEach {
+        from(mm) { include 'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES', 'licenses/**'; into 'META-INF' }
+    }
+    publishing { publications { maven(MavenPublication) { from components.java } } }
+}
+
+project(':typed-generator') {
+    group = 'local.a12.bootstrap'
+    version = '31.1.1'
+    sourceSets.main.java {
+        srcDir new File(kernel, 'kernel-md/kernel-md-facade/src/main/java')
+        include 'com/mgmtp/a12/kernel/md/document/typed_accessor_gen/**'
+    }
+    dependencies {
+        implementation 'com.mgmtp.a12.kernel:kernel-md-serializer:31.1.1'
+        implementation 'com.mgmtp.a12.kernel:kernel-md-documentmodel:31.1.1'
+        implementation 'com.mgmtp.a12.kernel:kernel-internal-base-utils:31.1.1'
+        implementation 'com.mgmtp.a12.base:base-model-utils:30.0.2'
+        implementation 'commons-cli:commons-cli:1.11.0'
+        implementation 'org.apache.commons:commons-text:1.15.0'
+        implementation 'org.antlr:ST4:4.3.4'
+    }
+}
+project(':validator-generator') {
+    group = 'local.a12.bootstrap'
+    version = '31.1.1'
+    dependencies {
+        implementation 'com.mgmtp.a12.kernel:kernel-internal-md-model:31.1.1'
+        runtimeOnly 'com.mgmtp.a12.kernel:kernel-core-runtime-31-1:31.1.1'
+    }
+}
+
+specs.each { spec ->
+    project(":${spec.artifact}") {
+        version = spec.version
+        def cfg = (spec.kind == 'typings' ? typingConfigs : spec.kind == 'validators' ? validatorConfigs : jsonConfigs)[spec.sourceArtifact]
+        if (cfg == null) throw new GradleException("No exported metamodel configuration for ${spec.sourceArtifact}")
+        def label = UtilsKt.labelFromVersion(version.toString())
+        def input = UtilsKt.getDocumentModelPath(mm, cfg.modelName, cfg.version, label, cfg.variant, cfg.isSpecialBulkVariation)
+        if (spec.kind == 'typings') {
+            configurations { generator }
+            dependencies {
+                generator project(':typed-generator')
+                api 'com.mgmtp.a12.kernel:kernel-md-document-v2:31.1.1'
+                compileOnly 'com.mgmtp.a12.base:base-model-utils:30.0.2'
+                cfg.externalIncludes.each { inc -> api project(inc.depProjPath.replace(':mmtypings:', ':')) }
+            }
+            def model = layout.buildDirectory.file('input/model.json')
+            def restoreIncludes = tasks.register('restoreIncludes') {
+                inputs.file(input)
+                outputs.file(model)
+                doLast { UtilsKt.copyDmAndReplaceGroupsWithUnresolvedInclude(input, model.get().asFile, cfg.externalIncludes) }
+            }
+            def generate = tasks.register('generate', JavaExec) {
+                dependsOn restoreIncludes
+                classpath = configurations.generator
+                mainClass = 'com.mgmtp.a12.kernel.md.document.typed_accessor_gen.TypedAccessorGenerator'
+                def output = layout.buildDirectory.dir('generated/java')
+                inputs.file(model)
+                outputs.dir(output)
+                args '--document-model-file', model.get().asFile,
+                     '--package-prefix', cfg.packagePrefix(),
+                     '--output-dir', output.get().asFile,
+                     '--annotations-fqns', 'com.mgmtp.a12.model.utils.OnlyForUsage'
+                if (!cfg.externalIncludes.isEmpty()) {
+                    args '--external-models'
+                    args cfg.externalIncludes.collect { it.externalModelsSpec }
+                }
+                doFirst { output.get().asFile.mkdirs() }
+            }
+            sourceSets.main.java.srcDir(generate)
+        } else if (spec.kind == 'validators') {
+            configurations {
+                generator {
+                    // The already-built validator breaks the generator's self-dependency.
+                    exclude group: 'com.mgmtp.a12.kernel', module: 'mmvalidators-extmpinternal-mm_common-v2-codegen'
+                }
+            }
+            dependencies {
+                generator project(':validator-generator')
+                if (System.getenv('A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION') != 'true') {
+                    generator files("${System.getProperty('maven.repo.local')}/com/mgmtp/a12/kernel/mmvalidators-extmpinternal-mm_common-v2-codegen/20.1.551424/mmvalidators-extmpinternal-mm_common-v2-codegen-20.1.551424.jar")
+                }
+                api 'com.mgmtp.a12.kernel:kernel-core-runtime-api:33.0.2'
+                implementation 'com.mgmtp.a12.kernel:kernel-core-runtime-31-1:31.1.1'
+            }
+            def generate = tasks.register('generate', JavaExec) {
+                classpath = configurations.generator
+                mainClass = 'local.a12.bootstrap.GenerateValidators'
+                def output = layout.buildDirectory.dir('generated/java')
+                inputs.file(input)
+                inputs.property('bootstrapSeed', System.getenv('A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION') ?: 'false')
+                outputs.dir(output)
+                args input, output.get().asFile, cfg.packagePrefix(), cfg.variant
+                doFirst {
+                    delete output
+                    output.get().asFile.mkdirs()
+                }
+            }
+            sourceSets.main.java.srcDir(generate)
+        } else {
+            def copyModels = tasks.register('copyModels', Copy) {
+                def prefix = cfg.visibility.resourcePrefix()
+                def resourceName = UtilsKt.dmResourceFileNameNoLabel(cfg.variant, cfg.modelName, cfg.version, cfg.isSpecialBulkVariation)
+                into layout.buildDirectory.dir('generated/resources')
+                from(input) { into prefix; rename { resourceName } }
+                from(input) { into prefix }
+                def previous = new File(input.parentFile, input.name.replace('.json', '-previous.json'))
+                if (previous.exists()) { from(previous) { into prefix } }
+            }
+            sourceSets.main.resources.srcDir(copyModels)
+        }
+    }
+}

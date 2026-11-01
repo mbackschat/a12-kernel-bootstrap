@@ -1,0 +1,6 @@
+import groovy.json.JsonSlurper
+rootProject.name = 'a12-release-bootstrap'
+includeBuild(System.getenv('A12_KERNEL_DIR'))
+include 'typed-generator', 'validator-generator'
+def specs = new JsonSlurper().parse(file('metamodels.json'))
+specs.each { spec -> include spec.artifact }

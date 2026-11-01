@@ -1,93 +1,88 @@
-# a12-kernel-bootstrap — A12 Kernel from-source bootstrap (public sources only)
+# a12-kernel-bootstrap
 
-This repo makes the **A12 Kernel** buildable on a fresh machine **without trial-and-error, using public sources only**. It clones the required A12 repos from public GitHub, applies the small local patches needed to build the open-source mirror, and publishes the kernel + its A12 dependencies to your **local Maven repository** (`~/.m2`). Any consumer project that pins the kernel can then resolve it.
+Build **A12 2026.06-ext1 / kernel 31.1.1** from pinned public sources, including
+Java, TypeScript, structural mapping, workspace conversion, code generation,
+CLI jars, Maven publications and npm tarballs.
 
-It is the canonical, project-independent bootstrap — clone it as a sibling of the A12 repos it builds, run `./bootstrap.sh`, then build your consumer project.
+The old build-utilities stub, obsolete metamodel patch and Java-only staging
+build are removed. The bootstrap builds the real upstream prerequisites and
+all projects selected by the kernel's release settings. Small remaining
+compatibility fixes are documented in [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md).
 
-> ⚠️ **This bootstrap is for the JAVA side only — TypeScript support is missing.**
-> The kernel also ships a parallel TypeScript runtime (`@com.mgmtp.a12.kernel/*`), but it is **not** built or published here, and there is **no patch for it**. The TS packages depend on `@com.mgmtp.a12.utils/*` (utils/logging/localization), `@com.mgmtp.a12.devtools/*`, and an ANTLR fork that this kit does not set up. Wiring up the TS side (e.g. building those sibling repos and serving them from a local npm registry) is an **open task** (see `a12-kernel/BUILD-TODO.md`). Everything here produces only the kernel's **Java** artifacts.
+## Build
 
-## Quick start
+Install Git, Python 3.12+, Node.js 24 with npm, and complete JDKs 21 and 25.
+Set `JAVA21_HOME` and `JAVA25_HOME` to their installation directories. JDK 25
+is required by the base modules; the kernel targets Java 21.
 
-```sh
-./bootstrap.sh        # clone (if missing) -> patch -> publish Java artifacts to mavenLocal
-# then build your consumer project (the exact command is printed at the end)
+```bash
+export JAVA21_HOME=/path/to/jdk-21
+export JAVA25_HOME=/path/to/jdk-25
+./bootstrap.sh
 ```
 
-Re-running is safe (idempotent): present repos are skipped, an already-applied patch is detected, publishing just overwrites. Set `A12_CONSUMER_DIR` to your project dir to have the closing message print a ready-to-paste build command.
+Gradle 9.8.2 is downloaded from its official distribution and checked against its
+published SHA-256. `GRADLE_BIN` can select an existing installation of the
+version pinned in [the release manifest](releases/2026.06-ext1.json).
 
-## Which A12 repos are needed (and where)
+By default, state is kept in `../.a12-bootstrap/2026.06-ext1`. Override it with
+`A12_BOOTSTRAP_HOME` or `--home /path/to/state`. Existing project checkouts are
+not modified. Git caches and generated source trees live under that directory;
+a changed source pin requires a new state directory.
 
-`bootstrap.sh` clones **four** repos from **`https://github.com/mgm-tp`** (the `GITHUB_ORG_URL` default). By default they sit **next to this repo**, under `A12_ROOT` (this repo's parent directory):
-
+```bash
+./bootstrap.sh --plan             # show the scope
+./bootstrap.sh --prepare          # fetch/extract sources without building
+./bootstrap.sh --check-upstream   # inspect public refs without changing pins
+python3 -m unittest discover -s tests -v
 ```
-A12_ROOT/                 # default: the parent directory of a12-kernel-bootstrap
-├── a12-kernel-bootstrap/ # ← this repo (the bootstrap kit)
-├── a12-kernel/           # the kernel itself — all kernel-* modules        (publish stage 8)
-├── a12-base/             # base model API / marshalling / utils @ 29.3.0   (publish stage 2)
-├── a12-kernel-mm/        # metamodel: typings, dmjsons, validators         (publish stages 4–7)
-└── a12-devtools/         # the build-utilities Gradle plugin               (publish stage 1)
-# ... plus any consumer project (e.g. a12-kernel-demo) as another sibling
-```
 
-| Repo | Default location | Override env var | Provides |
-|---|---|---|---|
-| [`a12-kernel`](https://github.com/mgm-tp/a12-kernel) | `$A12_ROOT/a12-kernel` | `A12_KERNEL_DIR` | the kernel modules a consumer resolves (`kernel-md-facade`, …) |
-| [`a12-base`](https://github.com/mgm-tp/a12-base) | `$A12_ROOT/a12-base` | `A12_BASE_DIR` | base model API / marshalling / utils, published @ `29.3.0` |
-| [`a12-kernel-mm`](https://github.com/mgm-tp/a12-kernel-mm) | `$A12_ROOT/a12-kernel-mm` | `A12_MM_DIR` | metamodel typings, dmjsons, and validators the kernel needs |
-| [`a12-devtools`](https://github.com/mgm-tp/a12-devtools) | `$A12_ROOT/a12-devtools` | `A12_DEVTOOLS_DIR` | the `build-utilities` Gradle plugin (stub-patched here) |
+## Outputs and verification
 
-Each is cloned at its **default branch**, which may have moved past the versions this kit pins — if the publish lands a different version, the script warns at the end (see *Compatibility* below). Already-present repos are skipped, so you can point any `*_DIR` variable at an existing checkout to reuse it instead of cloning.
+A successful run writes `build-success.json` only after building and checking
+the release. A failure exits nonzero and identifies the stage log under `logs/`.
 
-## Prerequisites
+| Path within the state directory | Contents |
+| --- | --- |
+| `maven/` | Maven artifacts, including kernel sources, Javadocs and CLI jars |
+| `npm-artifacts/` | Five kernel TypeScript packages and their source-built prerequisites |
+| `logs/` | Build, test and functional-check output for each stage |
+| `npm-smoke/` | Independent consumer installation of the built kernel tarballs |
+| `sources/` | Pinned upstream exports with documented build integration applied |
 
-- **git**, **curl**, **unzip**, and (for the `mmdmjsons` publish step) **Node.js + npm** on `PATH`.
-- **JDK 21** — runs Gradle. Auto-detected on macOS via `/usr/libexec/java_home -v 21`, or set `JAVA21_HOME`.
-- **JDK 25** — needed *only* to compile `a12-devtools`'s `build-utilities` (it declares a Java 25 toolchain). Auto-detected, or set `JAVA25_HOME`; the script warns if missing.
-- **Gradle 9.0.0** — downloaded automatically if not provided. **Do not use 9.5.1** — it can't build `a12-kernel-mm` (its `kotlin-dsl` plugin marker is unresolvable there).
+Point Maven or Gradle consumers at `maven/` using `-Dmaven.repo.local=/path/to/state/maven`.
+The bootstrap uses a temporary npm registry bound to loopback to resolve the
+source-built A12 packages. It stops that process on exit and never publishes to
+a public registry. TLS, downloaded artifact checksums and upstream dependency
+trust policies remain enabled.
 
-## Why the patches are needed
+Validation includes the prerequisite libraries' available tests, mandatory
+regeneration of the common validator with metamodel validation enabled, and
+the kernel's native `build`, `test`, `publishToMavenLocal` and `npm_pack` tasks.
+The public kernel export has no runnable Java or TypeScript unit-test suites;
+its standalone `npm_test` tasks fail because their test directories are absent.
+The bootstrap therefore also runs its own functional checks against the
+published Java artifacts and installed npm tarballs: compatible/incompatible
+structural mapping, workspace conversion, date comparisons, localization,
+IBAN validation, model deserialization/search, and generated lexer behavior.
+These checks are release integration tests, not a claim that unpublished
+upstream test suites ran.
 
-Building the open-source repos from public sources needs two small, local build-time adjustments, which `bootstrap.sh` applies automatically. One supplies a stub for the `build-utilities` Gradle plugin (its `src/` isn't part of the public `a12-devtools` export); the other makes a few version and build-configuration tweaks to `a12-kernel-mm` so it resolves and configures cleanly against the public model set. Both touch only the build setup — not the kernel's behaviour — and are kept in `patches/` for inspection.
+Supporting repositories are built for the libraries required by this kernel
+release. Their unrelated documentation applications, codemods and example
+applications are not part of the kernel release. The sibling demo repository
+is not rewritten by this script.
 
-## What the publish does (and the order — it breaks a cycle)
+## Reproducibility
 
-mm validators are generated by kernel codegen, while the kernel depends on mm — a cycle. The bootstrap breaks it by publishing to `mavenLocal` in this staged order (versions already match the kernel's pins, so `mavenLocal` resolution works):
+[releases/2026.06-ext1.json](releases/2026.06-ext1.json) records the public Git
+commits and release versions. The dependency lockfiles in `build-support/locks/`
+are installed with frozen/CI checks; the loopback URL in them is rebound to the
+temporary local registry without changing integrity hashes. Generated sources reuse the upstream metamodel
+catalog and the actual ext1 generators. The initial common-validator seed is
+followed by a required validated pass; a seed alone never marks a build complete.
 
-`build-utilities` → `a12-base@29.3.0` → kernel runtime/customfieldtype APIs → mm **typings** → mm **dmjsons** → the `mm_common` validator **seed** (built with `A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION=true`) → remaining mm **validators** → all kernel modules.
-
-`gradle/public-repos.init.gradle` is the isolated Gradle init (only `mavenCentral()` + `gradlePluginPortal()` + `mavenLocal()`), installed into an isolated `GRADLE_USER_HOME` so the machine's global Gradle config (which may point at a private registry) is bypassed.
-
-## Configuration (environment variables)
-
-All optional; defaults assume the repos are siblings of this repo.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `A12_ROOT` | parent dir of this repo | where sibling repos live / get cloned |
-| `A12_KERNEL_DIR` / `A12_BASE_DIR` / `A12_MM_DIR` / `A12_DEVTOOLS_DIR` | `$A12_ROOT/<repo>` | override an individual repo location |
-| `GITHUB_ORG_URL` | `https://github.com/mgm-tp` | clone source |
-| `KERNEL_VERSION` / `BASE_VERSION` | `30.8.1` / `29.3.0` | version pins the kit publishes under (override to match a different consumer) |
-| `GRADLE_VERSION` | `9.0.0` | Gradle to download/use |
-| `GRADLE_BIN` | (downloaded) | use an existing Gradle 9.0.0 binary |
-| `GRADLE_DIST_DIR` | `$A12_ROOT/.gradle-dist` | where Gradle is downloaded |
-| `A12_GRADLE_USER_HOME` | `$A12_ROOT/.gradle-isolated` | isolated, public-repos-only Gradle home |
-| `JAVA21_HOME` / `JAVA25_HOME` | `java_home -v 21` / `25` | JDKs |
-| `A12_CONSUMER_DIR` | (unset) | a consumer project dir, used only to print a ready-to-run build command at the end |
-
-## Flags
-
-`--skip-clone`, `--skip-patch`, `--skip-publish` (run only the phases you want), `--help`.
-
-## Compatibility — kernel versions
-
-This kit publishes kernel `30.8.1` and a12-base `29.3.0` by default. Because it clones each repo's **default branch**, a repo that has moved past these pins can publish a **different** version. The script checks `mavenLocal` at the end and **warns** if the published `kernel-md-facade` version differs from `KERNEL_VERSION`. If that happens: build the `a12-kernel` / `a12-kernel-mm` release matching the version you need (check out that tag/commit before running), export `KERNEL_VERSION` / `BASE_VERSION` to match, or align your consumer's pins.
-
-## Known limitations
-
-- **TypeScript is not built** (see the banner above).
-- The `kernel-md-structuralmapping` / `kernel-mapping-rt-facade` / `kernel-md-datatransfer-codegen` subtree is **not** built — it needs an mm artifact (`ct_field_type_attributes-1-a12`) that the public `a12-kernel-mm` export doesn't generate. The consumer-facing `kernel-md-facade` doesn't depend on it.
-
-## License
-
-The bootstrap script and docs in this repo are released under the **MIT License** — see [`LICENSE`](./LICENSE). The small build-time patches under `patches/` (the `build-utilities` stub and the `a12-kernel-mm` tweaks) derive from mgm's A12 sources and are mgm's, licensed separately — see the upstream repositories for their terms.
+Set `A12_GRADLE_USER_HOME` to reuse a configured Gradle cache or proxy setup.
+Otherwise the bootstrap uses its own `gradle-home/`. Java tools may need proxy
+and trust-store configuration in restricted environments; no credentials are
+required for the public source workflow.
