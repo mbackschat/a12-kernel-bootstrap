@@ -77,12 +77,9 @@ is not rewritten by this script.
 
 ## Reproducibility
 
-[releases/2026.06-ext1.json](releases/2026.06-ext1.json) records the public Git
-commits and release versions. The dependency lockfiles in `build-support/locks/`
-are installed with frozen/CI checks; the loopback URL in them is rebound to the
-temporary local registry without changing integrity hashes. Generated sources reuse the upstream metamodel
-catalog and the actual ext1 generators. The initial common-validator seed is
-followed by a required validated pass; a seed alone never marks a build complete.
+[releases/2026.06-ext1.json](releases/2026.06-ext1.json) records the public Git commits and release versions. The dependency lockfiles in `build-support/locks/` are installed with frozen/CI checks. Their loopback URL is rebound to the temporary local registry, and the integrity of each A12 package built by this run is bound to the tarball it just packed: gzip output is platform dependent (its header alone records the OS), so a hash recorded on another machine cannot match. A lock that names an A12 package the run has not built fails the build. Every third-party integrity hash stays locked.
+
+Generated sources reuse the upstream metamodel catalog and the actual ext1 generators. The initial common-validator seed is followed by a required validated pass; a seed alone never marks a build complete.
 
 Set `A12_GRADLE_USER_HOME` to reuse a configured Gradle cache or proxy setup.
 Otherwise the bootstrap uses its own `gradle-home/`. Java tools may need proxy

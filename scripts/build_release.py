@@ -32,6 +32,7 @@ class ReleaseBuilder:
         self.logs.mkdir(exist_ok=True)
         self.artifacts = state / 'npm-artifacts'
         self.artifacts.mkdir(exist_ok=True)
+        self.local_integrity = {}  # (package name, version) -> integrity of the tarball packed in this run
         for variable, repo in [('A12_KERNEL_DIR', 'a12-kernel'), ('A12_MM_DIR', 'a12-kernel-mm'),
                                ('A12_WCF_DIR', 'a12-dataservices-wcf')]:
             self.env[variable] = str(self.sources / repo)
@@ -205,8 +206,27 @@ log: {type: stdout, format: pretty, level: warn}
 
     def localize_lock(self, path):
         # The committed loopback address is a placeholder, not a hosted registry.
-        # Rebinding it changes only transport; all locked integrity hashes remain.
-        return path.read_text().replace('http://127.0.0.1:4873/', self.registry_url)
+        # A12 packages behind it are packed by this run, and their gzip bytes are
+        # platform dependent (the header alone records the OS), so a hash recorded
+        # on the lock author's machine cannot match. Bind those entries to the
+        # tarballs built here; every third-party integrity stays locked.
+        text = path.read_text().replace('http://127.0.0.1:4873/', self.registry_url)
+
+        def built(name, version):
+            try:
+                return self.local_integrity[(name, version)]
+            except KeyError:
+                raise BootstrapError(f'{path} locks {name}@{version}, which this run has not built') from None
+
+        if path.name == 'package-lock.json':
+            lock = json.loads(text)
+            for key, entry in lock['packages'].items():
+                if entry.get('resolved', '').startswith(self.registry_url):
+                    name = entry.get('name', key.rsplit('node_modules/', 1)[-1])
+                    entry['integrity'] = built(name, entry['version'])
+            return json.dumps(lock, indent=2, ensure_ascii=False) + '\n'
+        return re.sub(r"^(  '(@com\.mgmtp\.a12\.[^@']+)@([^'(]+)':\n    resolution: \{integrity: )[^,}]+",
+                      lambda m: m[1] + built(m[2], m[3]), text, flags=re.M)
 
     def package(self, repo, package, pnpm=True):
         root = self.sources / repo
@@ -216,6 +236,8 @@ log: {type: stdout, format: pretty, level: warn}
                    cwd=root if pnpm else root / package)
         data = json.loads((root / package / 'package.json').read_text())
         tarball = self.artifacts / (data['name'].lstrip('@').replace('/', '-') + '-' + data['version'] + '.tgz')
+        integrity = 'sha512-' + base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
+        self.local_integrity[(data['name'], data['version'])] = integrity
         url = self.registry_url + urllib.parse.quote(data['name'], safe='@') + '/' + data['version']
         try:
             published = json.load(urllib.request.urlopen(url))
@@ -223,7 +245,6 @@ log: {type: stdout, format: pretty, level: warn}
             if error.code != 404:
                 raise
         else:
-            integrity = 'sha512-' + base64.b64encode(hashlib.sha512(tarball.read_bytes()).digest()).decode()
             if published['dist']['integrity'] != integrity:
                 raise BootstrapError(f'Local artifact {data["name"]} changed; use a fresh --home to avoid stale packages')
             return

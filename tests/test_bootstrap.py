@@ -133,6 +133,7 @@ class BootstrapTests(unittest.TestCase):
         with patch.object(builder, "build_java_dependencies"), \
                 patch.object(builder, "registry", registry), \
                 patch.object(builder, "build_typescript_dependencies"), \
+                patch.object(builder, "localize_lock", return_value="{}"), \
                 patch.object(builder, "stage"), \
                 patch.object(builder, "java"), \
                 patch.object(builder, "check_typescript_artifacts", side_effect=bootstrap.BootstrapError("broken export")):
@@ -140,6 +141,78 @@ class BootstrapTests(unittest.TestCase):
                 builder.build()
         self.assertEqual(stopped, [True])
         self.assertFalse((self.state / "build-success.json").exists())
+
+
+class LockLocalizationTests(unittest.TestCase):
+    """Locked integrities of A12 packages built in this run must be the run's own.
+
+    gzip output is platform dependent (the header alone records the OS: 19 on
+    macOS, 3 on Linux), so a hash recorded on the lock author's machine can never
+    match a tarball packed here (observed 2026-11-01: ERR_PNPM_TARBALL_INTEGRITY
+    for @com.mgmtp.a12.devtools/tsconfig@2.0.1). Third-party hashes stay locked.
+    """
+
+    AUTHOR = "sha512-authorMachineHash=="
+    THIRD_PARTY = "sha512-thirdPartyHash=="
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.builder = build_release.ReleaseBuilder(self.root, {}, ["gradle"], {})
+        self.builder.registry_url = "http://127.0.0.1:5555/"
+        self.builder.local_integrity = {("@com.mgmtp.a12.devtools/tsconfig", "2.0.1"): "sha512-builtHere==",
+                                        ("@com.mgmtp.a12.kernel.antlr4/antlr4", "4.13.2-3"): "sha512-antlrHere=="}
+
+    def lock(self, name, text):
+        path = self.root / name
+        path.write_text(text)
+        return path
+
+    def test_pnpm_lock_binds_local_packages_to_built_tarballs(self):
+        lock = self.lock("pnpm-lock.yaml", f"""packages:
+
+  '@com.mgmtp.a12.devtools/tsconfig@2.0.1':
+    resolution: {{integrity: {self.AUTHOR}}}
+
+  typescript@6.0.3:
+    resolution: {{integrity: {self.THIRD_PARTY}}}
+    engines: {{node: '>=14.17'}}
+
+snapshots:
+
+  '@com.mgmtp.a12.devtools/tsconfig@2.0.1': {{}}
+""")
+        localized = self.builder.localize_lock(lock)
+        self.assertIn("'@com.mgmtp.a12.devtools/tsconfig@2.0.1':\n    resolution: {integrity: sha512-builtHere==}", localized)
+        self.assertIn(self.THIRD_PARTY, localized)
+        self.assertNotIn(self.AUTHOR, localized)
+
+    def test_npm_lock_binds_loopback_packages_including_aliases(self):
+        lock = self.lock("package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+            "node_modules/@com.mgmtp.a12.devtools/tsconfig": {
+                "version": "2.0.1", "integrity": self.AUTHOR,
+                "resolved": "http://127.0.0.1:4873/@com.mgmtp.a12.devtools/tsconfig/-/tsconfig-2.0.1.tgz"},
+            "node_modules/antlr4ForA12Kernel": {
+                "name": "@com.mgmtp.a12.kernel.antlr4/antlr4", "version": "4.13.2-3", "integrity": self.AUTHOR,
+                "resolved": "http://127.0.0.1:4873/@com.mgmtp.a12.kernel.antlr4/antlr4/-/antlr4-4.13.2-3.tgz"},
+            "node_modules/typescript": {
+                "version": "6.0.3", "integrity": self.THIRD_PARTY,
+                "resolved": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz"}}}, indent=2) + "\n")
+        packages = json.loads(self.builder.localize_lock(lock))["packages"]
+        self.assertEqual(packages["node_modules/@com.mgmtp.a12.devtools/tsconfig"]["integrity"], "sha512-builtHere==")
+        self.assertTrue(packages["node_modules/@com.mgmtp.a12.devtools/tsconfig"]["resolved"].startswith("http://127.0.0.1:5555/"))
+        self.assertEqual(packages["node_modules/antlr4ForA12Kernel"]["integrity"], "sha512-antlrHere==")
+        self.assertEqual(packages["node_modules/typescript"]["integrity"], self.THIRD_PARTY)
+
+    def test_lock_referencing_unbuilt_local_package_fails(self):
+        lock = self.lock("pnpm-lock.yaml", f"""packages:
+
+  '@com.mgmtp.a12.utils/utils-logging@7.0.2':
+    resolution: {{integrity: {self.AUTHOR}}}
+""")
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "utils-logging@7.0.2.*not built"):
+            self.builder.localize_lock(lock)
 
 
 def write_tool(path, script):
