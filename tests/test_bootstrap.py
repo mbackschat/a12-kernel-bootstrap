@@ -142,5 +142,92 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse((self.state / "build-success.json").exists())
 
 
+def write_tool(path, script):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n" + script)
+    path.chmod(0o755)
+    return path
+
+
+class PythonSelectionTests(unittest.TestCase):
+    """bootstrap.sh must not hand the build to a Python older than 3.12."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.bin = Path(temporary.name)
+        # An isolated PATH keeps host Pythons out; the wrapper only needs these tools.
+        for tool in ["dirname", "grep", "sort", "uniq"]:
+            (self.bin / tool).symlink_to(subprocess.check_output(["which", tool], text=True).strip())
+
+    def fake_python(self, name, supported):
+        write_tool(self.bin / name, f'[ "$1" = -c ] && exit {0 if supported else 1}\necho "{name} $@"\n')
+
+    def run_wrapper(self):
+        return subprocess.run(["/bin/bash", Path(__file__).resolve().parents[1] / "bootstrap.sh", "--plan"],
+                              env={"PATH": str(self.bin)}, capture_output=True, text=True)
+
+    def test_skips_old_default_python_for_newest_supported_version(self):
+        self.fake_python("python3", supported=False)
+        self.fake_python("python3.12", supported=True)
+        self.fake_python("python3.13", supported=True)
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"^python3\.13 .*/scripts/bootstrap\.py --plan$")
+
+    def test_reports_missing_supported_python(self):
+        self.fake_python("python3", supported=False)
+        result = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Python 3.12+", result.stderr)
+
+
+class DoctorTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path_bin = self.root / "path-bin"
+        self.path_bin.mkdir()
+        (self.path_bin / "git").symlink_to(subprocess.check_output(["which", "git"], text=True).strip())
+        self.release = {"gradle_version": "9.8.2"}
+
+    def fake_node(self, directory, version):
+        write_tool(directory / "node", f"echo {version}\n")
+        write_tool(directory / "npm", "echo 11.0.0\n")
+
+    def doctor(self, state=None):
+        output = io.StringIO()
+        env = {"PATH": str(self.path_bin)}
+        with patch.object(bootstrap, "jdk", side_effect=lambda major: f"/jdk/{major}"), \
+                contextlib.redirect_stdout(output):
+            try:
+                bootstrap.doctor(self.release, state or self.root / "state", env)
+            except bootstrap.BootstrapError as error:
+                return output.getvalue(), error
+        return output.getvalue(), None
+
+    def test_wrong_node_on_path_points_to_installed_node24(self):
+        self.fake_node(self.path_bin, "v26.10.0")
+        node24 = self.root / "homebrew/opt/node@24/bin"
+        self.fake_node(node24, "v24.22.2")
+        with patch.object(bootstrap, "NODE_SEARCH_PATTERNS", [str(self.root / "homebrew/opt/node@*/bin")]):
+            output, error = self.doctor()
+        self.assertIsNotNone(error)
+        self.assertRegex(output, r"MISSING\s+Node\.js 24: .*v26\.10\.0")
+        self.assertIn(f'export PATH="{node24}:$PATH"', output)
+        self.assertRegex(output, r"OK\s+JDK 21: /jdk/21")
+
+    def test_complete_toolchain_passes_without_creating_state(self):
+        self.fake_node(self.path_bin, "v24.22.2")
+        state = self.root / "state"
+        output, error = self.doctor(state)
+        self.assertIsNone(error, output)
+        self.assertRegex(output, r"OK\s+Node\.js 24: v24\.22\.2")
+        self.assertRegex(output, r"OK\s+Gradle: 9\.8\.2 will be downloaded")
+        self.assertNotIn("MISSING", output)
+        self.assertFalse(state.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 """Build the complete pinned A12 Java and TypeScript release from public sources."""
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -17,6 +18,10 @@ import zipfile
 
 KIT = Path(__file__).resolve().parents[1]
 RELEASE_FILE = KIT / "releases" / "2026.06-ext1.json"
+# Where Node.js versions are commonly installed side by side. Used only to suggest
+# a PATH fix; the build itself always uses the `node` found on PATH.
+NODE_SEARCH_PATTERNS = ["/opt/homebrew/opt/node@*/bin", "/usr/local/opt/node@*/bin",
+                        os.path.join(os.environ.get("NVM_DIR", os.path.expanduser("~/.nvm")), "versions/node/*/bin")]
 
 
 class BootstrapError(RuntimeError):
@@ -120,6 +125,57 @@ def jdk(major):
     raise BootstrapError(f"A complete JDK {major} is required; set JAVA{major}_HOME (a JRE is insufficient)")
 
 
+def check_gradle(binary, version, env):
+    actual = run([binary, "--version"], env=env, capture=True)
+    if f"Gradle {version}\n" not in actual:
+        raise BootstrapError(f"This release requires Gradle {version}")
+
+
+def node24(env):
+    """Return the Node.js 24 found on env's PATH, or name installed ones that would work."""
+    node = shutil.which("node", path=env.get("PATH"))
+    version = run([node, "--version"], env=env, capture=True) if node else "none"
+    if version.startswith("v24."):
+        npm = run(["npm", "--version"], env=env, capture=True)
+        return f"{version} at {node} (npm {npm})"
+    fixes = [f'export PATH="{directory}:$PATH"'
+             for directory in sorted({d for pattern in NODE_SEARCH_PATTERNS for d in glob.glob(pattern)})
+             if (Path(directory) / "node").is_file()
+             and run([Path(directory) / "node", "--version"], capture=True).startswith("v24.")]
+    fixes = fixes or ["install Node.js 24 and put it first on PATH"]
+    raise BootstrapError(f"Upstream requires Node.js 24; PATH provides {version}"
+                         + "".join(f"\n  fix: {fix}" for fix in fixes))
+
+
+def doctor(release, state, env):
+    """Report every tool the build needs, without creating state or building."""
+    checks = [("Python", lambda: f"{sys.version.split()[0]} at {sys.executable}"),
+              ("Git", lambda: run(["git", "--version"], env=env, capture=True)),
+              ("JDK 21", lambda: jdk(21)),
+              ("JDK 25", lambda: jdk(25)),
+              ("Node.js 24", lambda: node24(env))]
+    version = release["gradle_version"]
+
+    def gradle():
+        if env.get("GRADLE_BIN"):
+            check_gradle(Path(env["GRADLE_BIN"]).resolve(), version, env | {"JAVA_HOME": jdk(21)})
+            return f"{version} at {env['GRADLE_BIN']}"
+        if (state / "tools" / f"gradle-{version}" / "bin" / "gradle").exists():
+            return f"{version} already downloaded to {state / 'tools'}"
+        return f"{version} will be downloaded and SHA-256 verified on the first build"
+    checks.append(("Gradle", gradle))
+    missing = 0
+    for name, check in checks:
+        try:
+            print(f"OK       {name}: {check()}")
+        except BootstrapError as error:
+            missing += 1
+            print(f"MISSING  {name}: {error}")
+    if missing:
+        raise BootstrapError(f"{missing} prerequisite(s) missing; apply the fixes above")
+    print("All build prerequisites are available.")
+
+
 def build_plan():
     return [
         ("Java prerequisites", "Gradle", ["real devtools plugins", "base", "workspace conversion API"]),
@@ -158,6 +214,7 @@ def main(argv=None):
     mode.add_argument("--prepare", action="store_true", help="prepare pinned source trees only; does not establish build readiness")
     mode.add_argument("--plan", action="store_true", help="show the complete Java and TypeScript build scope without executing it")
     mode.add_argument("--check-upstream", action="store_true", help="show public branch/tag refs without changing the pinned release")
+    mode.add_argument("--doctor", action="store_true", help="check the installed build tools and suggest fixes without building")
     parser.add_argument("--home", type=Path, default=Path(os.environ.get("A12_BOOTSTRAP_HOME", KIT.parent / ".a12-bootstrap" / "2026.06-ext1")))
     args = parser.parse_args(argv)
     release = load_release()
@@ -172,6 +229,9 @@ def main(argv=None):
             run(["git", "ls-remote", "--heads", "--tags", f"https://github.com/mgm-tp/{name}.git"])
         return
     state = args.home.resolve()
+    if args.doctor:
+        doctor(release, state, os.environ.copy())
+        return
     state.mkdir(parents=True, exist_ok=True)
     prepare_sources(state, release["repositories"])
     if args.prepare:
@@ -194,12 +254,8 @@ def main(argv=None):
               "--no-configuration-cache", "--max-workers=2", f"-Dmaven.repo.local={state / 'maven'}",
               "-I", KIT / "build-support/javadoc.init.gradle",
               f"-Dorg.gradle.java.installations.paths={env['JAVA_HOME']},{java25}"]
-    actual_version = run(gradle[:1] + ["--version"], env=env, capture=True)
-    if f"Gradle {release['gradle_version']}\n" not in actual_version:
-        raise BootstrapError(f"This release requires Gradle {release['gradle_version']}")
-    node_version = run(["node", "--version"], env=env, capture=True)
-    if not node_version.startswith("v24."):
-        raise BootstrapError("Upstream requires Node.js 24")
+    check_gradle(gradle[0], release["gradle_version"], env)
+    node24(env)
 
     from build_release import ReleaseBuilder
     ReleaseBuilder(state, release, gradle, env).build()

@@ -11,15 +11,16 @@ compatibility fixes are documented in [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md).
 
 ## Build
 
-Install Git, Python 3.12+, Node.js 24 with npm, and complete JDKs 21 and 25.
-Set `JAVA21_HOME` and `JAVA25_HOME` to their installation directories. JDK 25
-is required by the base modules; the kernel targets Java 21.
+Install Git, Python 3.12+, Node.js 24 with npm, and complete JDKs 21 and 25. JDK 25 is required by the base modules; the kernel targets Java 21.
+
+Check the toolchain first. `--doctor` reports each prerequisite as OK or MISSING, and for a wrong Node.js on PATH it prints the `export PATH=…` line for any installed Node.js 24 (Homebrew `node@24`, nvm). It neither creates state nor builds.
 
 ```bash
-export JAVA21_HOME=/path/to/jdk-21
-export JAVA25_HOME=/path/to/jdk-25
+./bootstrap.sh --doctor
 ./bootstrap.sh
 ```
+
+`bootstrap.sh` uses `python3` when it is 3.12+, otherwise the newest `python3.N` on PATH. JDKs are found through `JAVA21_HOME` / `JAVA25_HOME`, `JAVA_HOME`, or on macOS `/usr/libexec/java_home`; set the variables to select specific installations.
 
 Gradle 9.8.2 is downloaded from its official distribution and checked against its
 published SHA-256. `GRADLE_BIN` can select an existing installation of the
@@ -31,6 +32,7 @@ not modified. Git caches and generated source trees live under that directory;
 a changed source pin requires a new state directory.
 
 ```bash
+./bootstrap.sh --doctor           # check installed tools, suggest fixes
 ./bootstrap.sh --plan             # show the scope
 ./bootstrap.sh --prepare          # fetch/extract sources without building
 ./bootstrap.sh --check-upstream   # inspect public refs without changing pins
