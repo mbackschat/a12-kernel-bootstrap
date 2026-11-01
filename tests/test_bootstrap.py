@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -136,11 +137,62 @@ class BootstrapTests(unittest.TestCase):
                 patch.object(builder, "localize_lock", return_value="{}"), \
                 patch.object(builder, "stage"), \
                 patch.object(builder, "java"), \
-                patch.object(builder, "check_typescript_artifacts", side_effect=bootstrap.BootstrapError("broken export")):
+                patch.object(builder, "check_typescript_artifacts", side_effect=bootstrap.BootstrapError("broken export")), \
+                patch.object(builder, "install_maven_local") as install:
             with self.assertRaisesRegex(bootstrap.BootstrapError, "broken export"):
                 builder.build()
         self.assertEqual(stopped, [True])
         self.assertFalse((self.state / "build-success.json").exists())
+        install.assert_not_called()  # an unverified build must never reach ~/.m2
+
+
+class MavenLocalInstallTests(unittest.TestCase):
+    """The isolated build's Maven output reaches ~/.m2 like publishToMavenLocal would."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / "state").mkdir()
+        self.builder = build_release.ReleaseBuilder(self.root / "state", {}, ["gradle"], {})
+        self.m2 = self.root / "m2"
+        self.artifact = Path("com/mgmtp/a12/kernel/kernel-md-facade")
+
+    @staticmethod
+    def index(versions, latest):
+        return ("<?xml version='1.0' encoding='UTF-8'?>\n<metadata>\n  <groupId>com.mgmtp.a12.kernel</groupId>\n"
+                "  <artifactId>kernel-md-facade</artifactId>\n  <versioning>\n"
+                f"    <latest>{latest}</latest>\n    <release>{latest}</release>\n    <versions>\n"
+                + "".join(f"      <version>{v}</version>\n" for v in versions)
+                + f"    </versions>\n    <lastUpdated>{latest.replace('.', '')}</lastUpdated>\n  </versioning>\n</metadata>\n")
+
+    def put(self, root, relative, text):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def test_installs_new_release_and_keeps_other_releases(self):
+        built = self.builder.state / "maven"
+        self.put(built, self.artifact / "31.1.1/kernel-md-facade-31.1.1.jar", "ext1 jar")
+        self.put(built, self.artifact / "maven-metadata-local.xml", self.index(["31.1.1"], "31.1.1"))
+        self.put(self.m2, self.artifact / "30.8.1/kernel-md-facade-30.8.1.jar", "ext5 jar")
+        self.put(self.m2, self.artifact / "31.1.1/kernel-md-facade-31.1.1.jar", "stale earlier install")
+        self.put(self.m2, self.artifact / "maven-metadata-local.xml", self.index(["30.8.1"], "30.8.1"))
+
+        self.builder.install_maven_local(self.m2)
+
+        self.assertEqual((self.m2 / self.artifact / "30.8.1/kernel-md-facade-30.8.1.jar").read_text(), "ext5 jar")
+        self.assertEqual((self.m2 / self.artifact / "31.1.1/kernel-md-facade-31.1.1.jar").read_text(), "ext1 jar")
+        index = (self.m2 / self.artifact / "maven-metadata-local.xml").read_text()
+        self.assertEqual(re.findall(r"<version>([^<]+)</version>", index), ["30.8.1", "31.1.1"])
+        self.assertIn("<release>31.1.1</release>", index)
+
+    def test_new_artifact_index_is_copied(self):
+        built = self.builder.state / "maven"
+        self.put(built, self.artifact / "maven-metadata-local.xml", self.index(["31.1.1"], "31.1.1"))
+        self.builder.install_maven_local(self.m2)
+        self.assertEqual((self.m2 / self.artifact / "maven-metadata-local.xml").read_text(),
+                         self.index(["31.1.1"], "31.1.1"))
 
 
 class LockLocalizationTests(unittest.TestCase):

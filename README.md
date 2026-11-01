@@ -41,8 +41,7 @@ python3 -m unittest discover -s tests -v
 
 ## Outputs and verification
 
-A successful run writes `build-success.json` only after building and checking
-the release. A failure exits nonzero and identifies the stage log under `logs/`.
+A successful run writes `build-success.json` only after building and checking the release. A failure exits nonzero and identifies the stage log under `logs/`.
 
 | Path within the state directory | Contents |
 | --- | --- |
@@ -52,11 +51,17 @@ the release. A failure exits nonzero and identifies the stage log under `logs/`.
 | `npm-smoke/` | Independent consumer installation of the built kernel tarballs |
 | `sources/` | Pinned upstream exports with documented build integration applied |
 
-Point Maven or Gradle consumers at `maven/` using `-Dmaven.repo.local=/path/to/state/maven`.
-The bootstrap uses a temporary npm registry bound to loopback to resolve the
-source-built A12 packages. It stops that process on exit and never publishes to
-a public registry. TLS, downloaded artifact checksums and upstream dependency
-trust policies remain enabled.
+The bootstrap uses a temporary npm registry bound to loopback to resolve the source-built A12 packages. It stops that process on exit and never publishes to a public registry. TLS, downloaded artifact checksums and upstream dependency trust policies remain enabled.
+
+### Local Maven repository (`~/.m2`)
+
+After `build-success.json` is written, the release's Maven artifacts are installed into `~/.m2/repository`, so Maven and Gradle projects pick them up through `mavenLocal()` as they did with the 2025.06 kit. A failed or unverified build never reaches `~/.m2`.
+
+The install follows `publishToMavenLocal` semantics: files of this release's coordinates are replaced (so a rerun refreshes them), every other version is left untouched (2025.06-ext5 and other releases coexist), and each artifact's `maven-metadata-local.xml` is merged, adding this release's versions to the list and making them `latest`/`release`. That only affects dynamic selectors such as `latest.release`; pinned versions resolve as before. A `<localRepository>` set in Maven's `settings.xml` is not honoured.
+
+**Why the build does not publish to `~/.m2` directly.** The build passes `-Dmaven.repo.local=<state>/maven` to every Gradle stage, because `mavenLocal()` is also how later stages resolve earlier ones (devtools plugins, base, WCF API, metamodels). Isolated, only artifacts built by this run can satisfy those dependencies. Sharing `~/.m2` would let an older or foreign jar at the same coordinates, such as an earlier run's output or a vendor binary, stand in for a broken from-source stage and hide it. Installing into `~/.m2` is therefore a separate delivery step after verification.
+
+**Issue fixed.** The first 2026.06-ext1 version of this kit (commit 70e6b58) isolated the build but never delivered the result: artifacts stayed in `<state>/maven`, and consumers had to point `-Dmaven.repo.local` at it, unlike the 2025.06 kit, which published to `~/.m2`. Using that state repository as a consumer's local repository also mixes the consumer's own downloads and installs into the release output.
 
 Validation includes the prerequisite libraries' available tests, mandatory
 regeneration of the common validator with metamodel validation enabled, and

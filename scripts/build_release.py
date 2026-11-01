@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import urllib.parse
+import xml.etree.ElementTree as ElementTree
 
 from bootstrap import KIT, BootstrapError, run
 
@@ -22,6 +23,22 @@ def write_changed(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists() or path.read_text() != text:
         path.write_text(text)
+
+
+def merge_version_index(source, target):
+    """Add source's versions to target's index and make source's release the latest."""
+    merged = ElementTree.parse(target)
+    versioning = merged.getroot().find('versioning')
+    new = ElementTree.parse(source).getroot().find('versioning')
+    listed = versioning.find('versions')
+    known = {version.text for version in listed}
+    for version in new.find('versions'):
+        if version.text not in known:
+            ElementTree.SubElement(listed, 'version').text = version.text
+    for tag in ['latest', 'release', 'lastUpdated']:
+        versioning.find(tag).text = new.find(tag).text
+    ElementTree.indent(merged, '  ')
+    merged.write(target, xml_declaration=True, encoding='UTF-8')
 
 
 class ReleaseBuilder:
@@ -296,6 +313,23 @@ log: {type: stdout, format: pretty, level: warn}
         ready.write_text(json.dumps({'release': self.release, 'maven': str(self.state / 'maven'),
                                      'npm': str(self.artifacts)}, indent=2) + '\n')
         print(f'Full release build completed: {ready}', flush=True)
+        self.install_maven_local(Path.home() / '.m2' / 'repository')
+
+    def install_maven_local(self, repository):
+        # The build resolves its own stages through an isolated mavenLocal so a
+        # foreign or stale jar in ~/.m2 cannot stand in for a from-source stage.
+        # Consumers still expect ~/.m2, so install the verified output the way
+        # publishToMavenLocal does: replace these coordinates, keep every other
+        # version, and merge each artifact's version index instead of replacing it.
+        built = self.state / 'maven'
+        for source in sorted(path for path in built.rglob('*') if path.is_file()):
+            target = repository / source.relative_to(built)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.name == 'maven-metadata-local.xml' and target.exists():
+                merge_version_index(source, target)
+            else:
+                shutil.copy2(source, target)
+        print(f'Installed the release Maven artifacts into {repository}', flush=True)
 
     def check_typescript_artifacts(self):
         kernel_packages = sorted((self.sources / 'a12-kernel').glob('**/build/libs/*.tgz'))
