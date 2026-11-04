@@ -113,10 +113,31 @@ class BootstrapTests(unittest.TestCase):
         marker = self.state / "build-success.json"
         marker.write_text('{"old": "success"}')
         builder = build_release.ReleaseBuilder(self.state, {}, ["gradle"], {})
-        with patch.object(builder, "build_java_dependencies", side_effect=bootstrap.BootstrapError("compile failed")):
+        with patch.object(builder, "provision_pnpm"), \
+                patch.object(builder, "build_java_dependencies", side_effect=bootstrap.BootstrapError("compile failed")):
             with self.assertRaisesRegex(bootstrap.BootstrapError, "compile failed"):
                 builder.build()
         self.assertFalse(marker.exists())
+
+    def test_pinned_pnpm_is_on_path_before_java_stages(self):
+        # The devtools integration plugin's own tests run `pnpm list` from PATH in
+        # the devtools-java stage; without one they stamp only the root package.json
+        # (a12-dmkits CI run 41820545552, 2026-11-04: hosted runners carry no pnpm).
+        self.state.mkdir()
+        builder = build_release.ReleaseBuilder(self.state, {}, ["gradle"], {"PATH": "/usr/bin"})
+        pnpm = self.state / "tools/pnpm-11.17.0/node_modules/.bin/pnpm"
+        seen = []
+
+        def java_stages():
+            seen.append(builder.env["PATH"])
+            raise bootstrap.BootstrapError("stop after java stages")
+
+        with patch.object(builder, "install_tool", return_value=pnpm) as install, \
+                patch.object(builder, "build_java_dependencies", side_effect=java_stages):
+            with self.assertRaisesRegex(bootstrap.BootstrapError, "stop after java stages"):
+                builder.build()
+        install.assert_called_once_with("pnpm", "11.17.0", "pnpm")
+        self.assertEqual(seen, [f"{pnpm.parent}:/usr/bin"])
 
     def test_failed_artifact_check_prevents_success_and_stops_registry(self):
         self.state.mkdir()
@@ -131,7 +152,8 @@ class BootstrapTests(unittest.TestCase):
             finally:
                 stopped.append(True)
 
-        with patch.object(builder, "build_java_dependencies"), \
+        with patch.object(builder, "provision_pnpm"), \
+                patch.object(builder, "build_java_dependencies"), \
                 patch.object(builder, "registry", registry), \
                 patch.object(builder, "build_typescript_dependencies"), \
                 patch.object(builder, "localize_lock", return_value="{}"), \

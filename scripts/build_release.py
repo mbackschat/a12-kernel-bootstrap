@@ -268,10 +268,14 @@ log: {type: stdout, format: pretty, level: warn}
         self.stage(repo + '-' + package.replace('/', '-') + '-publish-local',
                    ['npm', 'publish', tarball, '--registry', self.registry_url, '--tag', 'bootstrap'])
 
-    def build_typescript_dependencies(self):
+    def provision_pnpm(self):
+        # Java stages need pnpm too: the devtools integration plugin's tests run
+        # `pnpm list` from PATH, and hosted CI runners carry no pnpm of their own.
         self.pnpm = self.install_tool('pnpm', '11.17.0', 'pnpm')
         self.env['PATH'] = str(self.pnpm.parent) + os.pathsep + self.env['PATH']
         self.env['npm_config_manage_package_manager_versions'] = 'false'
+
+    def build_typescript_dependencies(self):
         packages = ['packages/build-tools', 'packages/eslint-config', 'packages/prettier-config', 'packages/tsconfig']
         self.prepare_workspace('a12-devtools', packages)
         self.stage('devtools-ts-compile', [self.pnpm, '-r', 'run', 'compile'], cwd=self.sources / 'a12-devtools')
@@ -300,6 +304,7 @@ log: {type: stdout, format: pretty, level: warn}
         ready.unlink(missing_ok=True)
         if self.env.get('A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION'):
             raise BootstrapError('Unset A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION; only the initial seed may use it')
+        self.provision_pnpm()
         self.build_java_dependencies()
         with self.registry():
             self.build_typescript_dependencies()
