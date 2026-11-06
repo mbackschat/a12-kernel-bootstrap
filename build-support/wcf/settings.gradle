@@ -1,6 +1,11 @@
 rootProject.name = 'dataservices-wcf-api'
 dependencyResolutionManagement {
     versionCatalogs {
-        libs { from(files("${System.getenv('A12_WCF_DIR')}/gradle/libs.versions.toml")) }
+        libs {
+            from(files("${System.getenv('A12_WCF_DIR')}/gradle/libs.versions.toml"))
+            // Upstream moves this key to each release's base (the a12DependencyVersions
+            // mapping in its build.gradle); the public WCF export can lag behind base.
+            version('a12BaseVersion', System.getenv('A12_BASE_VERSION'))
+        }
     }
 }

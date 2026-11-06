@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 
 spec = importlib.util.spec_from_file_location("bootstrap", Path(__file__).resolve().parents[1] / "scripts/bootstrap.py")
@@ -20,6 +21,9 @@ spec.loader.exec_module(bootstrap)
 helper_spec = importlib.util.spec_from_file_location("build_release", Path(__file__).resolve().parents[1] / "scripts/build_release.py")
 build_release = importlib.util.module_from_spec(helper_spec)
 helper_spec.loader.exec_module(build_release)
+compare_spec = importlib.util.spec_from_file_location("compare_reference", Path(__file__).resolve().parents[1] / "scripts/compare_reference.py")
+compare_reference = importlib.util.module_from_spec(compare_spec)
+compare_spec.loader.exec_module(compare_reference)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -28,6 +32,7 @@ class BootstrapTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.state = self.root / "state"
+        self.urls = {"a12-fixture": (self.root / "upstream").as_uri()}
 
     def git(self, *args, cwd=None):
         return subprocess.check_output(["git", *map(str, args)], cwd=cwd, text=True,
@@ -51,11 +56,11 @@ class BootstrapTests(unittest.TestCase):
 
     def test_prepare_preserves_upstream_and_reuses_exact_snapshot(self):
         original, commit = self.make_cache()
-        bootstrap.prepare_sources(self.state, {"a12-fixture": commit})
+        bootstrap.prepare_sources(self.state, {"a12-fixture": commit}, self.urls)
         generated = self.state / "sources/a12-fixture"
         self.assertEqual((generated / "library.txt").read_text(), "pinned upstream source\n")
         (generated / "build-output.txt").write_text("retained output")
-        bootstrap.prepare_sources(self.state, {"a12-fixture": commit})
+        bootstrap.prepare_sources(self.state, {"a12-fixture": commit}, self.urls)
         self.assertEqual((generated / "build-output.txt").read_text(), "retained output")
         self.assertEqual(self.git("status", "--porcelain", cwd=original), "")
 
@@ -64,23 +69,58 @@ class BootstrapTests(unittest.TestCase):
         source.mkdir(parents=True)
         (source / "user-work.txt").write_text("keep me")
         with self.assertRaisesRegex(bootstrap.BootstrapError, "Refusing to overwrite"):
-            bootstrap.prepare_sources(self.state, {"a12-fixture": "1" * 40})
+            bootstrap.prepare_sources(self.state, {"a12-fixture": "1" * 40}, self.urls)
         self.assertEqual((source / "user-work.txt").read_text(), "keep me")
 
     def test_changed_pin_cannot_silently_reuse_old_build(self):
         _, commit = self.make_cache()
-        bootstrap.prepare_sources(self.state, {"a12-fixture": commit})
+        bootstrap.prepare_sources(self.state, {"a12-fixture": commit}, self.urls)
         with self.assertRaisesRegex(bootstrap.BootstrapError, "Source pin changed"):
-            bootstrap.prepare_sources(self.state, {"a12-fixture": "1" * 40})
+            bootstrap.prepare_sources(self.state, {"a12-fixture": "1" * 40}, self.urls)
         metadata = json.loads((self.state / "sources/a12-fixture/.bootstrap-source.json").read_text())
         self.assertEqual(metadata["commit"], commit)
 
     def test_archive_cannot_escape_source_root(self):
         _, commit = self.make_cache(unsafe_link=True)
         with self.assertRaises(tarfile.FilterError):
-            bootstrap.prepare_sources(self.state, {"a12-fixture": commit})
+            bootstrap.prepare_sources(self.state, {"a12-fixture": commit}, self.urls)
         self.assertFalse((self.state / "sources/a12-fixture").exists())
         self.assertFalse((self.state / "outside").exists())
+
+    def test_pinned_fork_commit_is_fetched_into_an_upstream_cache(self):
+        # A cache cloned from mgm-tp lacks the commits of a temporary fixes fork;
+        # pinning one must fetch it from the fork rather than fail or re-clone.
+        upstream, _ = self.make_cache()
+        fork = self.root / "fork"
+        self.git("clone", upstream, fork)
+        (fork / "fix.txt").write_text("correction\n")
+        self.git("add", ".", cwd=fork)
+        self.git("-c", "user.name=Bootstrap Test", "-c", "user.email=test@example.invalid",
+                 "commit", "-m", "fix", cwd=fork)
+        commit = self.git("rev-parse", "HEAD", cwd=fork)
+        bootstrap.prepare_sources(self.state, {"a12-fixture": commit}, {"a12-fixture": fork.as_uri()})
+        self.assertEqual((self.state / "sources/a12-fixture/fix.txt").read_text(), "correction\n")
+
+    def test_unknown_commit_is_reported_with_its_repository(self):
+        self.make_cache()
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "Command failed"):
+            bootstrap.prepare_sources(self.state, {"a12-fixture": "1" * 40}, self.urls)
+        self.assertFalse((self.state / "sources/a12-fixture").exists())
+
+    def test_fork_must_replace_a_pinned_repository(self):
+        manifest = self.root / "release.json"
+        manifest.write_text(json.dumps({"repositories": {"a12-kernel": "0" * 40},
+                                        "forks": {"a12-base": "https://github.com/someone/a12-base-fixes.git"}}))
+        with patch.object(bootstrap, "RELEASE_FILE", manifest), \
+                self.assertRaisesRegex(bootstrap.BootstrapError, "fork"):
+            bootstrap.load_release()
+
+    def test_repository_url_prefers_the_fork(self):
+        release = {"repositories": {"a12-kernel": "0" * 40, "a12-base": "1" * 40},
+                   "forks": {"a12-base": "https://github.com/someone/a12-base-fixes.git"}}
+        self.assertEqual(bootstrap.repository_urls(release),
+                         {"a12-kernel": "https://github.com/mgm-tp/a12-kernel.git",
+                          "a12-base": "https://github.com/someone/a12-base-fixes.git"})
 
     def test_tampered_download_is_rejected(self):
         archive = self.root / "distribution.zip"
@@ -119,25 +159,33 @@ class BootstrapTests(unittest.TestCase):
                 builder.build()
         self.assertFalse(marker.exists())
 
-    def test_pinned_pnpm_is_on_path_before_java_stages(self):
+    def test_devtools_pnpm_is_on_path_before_java_stages(self):
         # The devtools integration plugin's own tests run `pnpm list` from PATH in
         # the devtools-java stage; without one they stamp only the root package.json
         # (a12-dmkits CI run 41820545552, 2026-11-04: hosted runners carry no pnpm).
+        # It must be devtools' own major: pnpm 12 no longer matches the `./*`
+        # workspace globs those tests use (reproduced 2026-11-06, pnpm 12.3.4 vs 11.17.0).
         self.state.mkdir()
-        builder = build_release.ReleaseBuilder(self.state, {}, ["gradle"], {"PATH": "/usr/bin"})
-        pnpm = self.state / "tools/pnpm-11.17.0/node_modules/.bin/pnpm"
+        release = {"pnpm_version": "12.3.4", "pnpm_overrides": {"a12-devtools": "11.17.0"}}
+        builder = build_release.ReleaseBuilder(self.state, release, ["gradle"], {"PATH": "/usr/bin"})
         seen = []
 
         def java_stages():
             seen.append(builder.env["PATH"])
             raise bootstrap.BootstrapError("stop after java stages")
 
-        with patch.object(builder, "install_tool", return_value=pnpm) as install, \
+        # Every pnpm call, not only installs, must use the isolated store: a `pnpm run`
+        # on another store relinks node_modules from it, which undid the code editor's
+        # antlr4 type correction and downloaded into the user's store (2026-11-06).
+        tool = lambda package, version, binary: self.state / f"tools/{package}-{version}/node_modules/.bin/{binary}"
+        with patch.object(builder, "install_tool", side_effect=tool), \
                 patch.object(builder, "build_java_dependencies", side_effect=java_stages):
             with self.assertRaisesRegex(bootstrap.BootstrapError, "stop after java stages"):
                 builder.build()
-        install.assert_called_once_with("pnpm", "11.17.0", "pnpm")
-        self.assertEqual(seen, [f"{pnpm.parent}:/usr/bin"])
+            other = builder.pnpm("a12-base")
+        self.assertEqual(seen, [f"{self.state / 'tools/pnpm-11.17.0/node_modules/.bin'}:/usr/bin"])
+        self.assertEqual(other, self.state / "tools/pnpm-12.3.4/node_modules/.bin/pnpm")
+        self.assertEqual(builder.env["pnpm_config_store_dir"], str(self.state / "pnpm-store"))
 
     def test_failed_artifact_check_prevents_success_and_stops_registry(self):
         self.state.mkdir()
@@ -157,6 +205,7 @@ class BootstrapTests(unittest.TestCase):
                 patch.object(builder, "registry", registry), \
                 patch.object(builder, "build_typescript_dependencies"), \
                 patch.object(builder, "localize_lock", return_value="{}"), \
+                patch.object(builder, "record_lock"), \
                 patch.object(builder, "stage"), \
                 patch.object(builder, "java"), \
                 patch.object(builder, "check_typescript_artifacts", side_effect=bootstrap.BootstrapError("broken export")), \
@@ -279,6 +328,14 @@ snapshots:
         self.assertEqual(packages["node_modules/antlr4ForA12Kernel"]["integrity"], "sha512-antlrHere==")
         self.assertEqual(packages["node_modules/typescript"]["integrity"], self.THIRD_PARTY)
 
+    def test_resolved_lock_is_recorded_with_the_placeholder_registry(self):
+        resolved = self.lock("resolved.yaml", "  '@com.mgmtp.a12.devtools/tsconfig@2.0.1':\n"
+                                              "    resolution: {tarball: http://127.0.0.1:5555/tsconfig-2.0.1.tgz}\n")
+        kept = self.root / "kit/locks/a12-devtools/pnpm-lock.yaml"
+        self.builder.record_lock(resolved, kept)
+        self.assertEqual(kept.read_text(), "  '@com.mgmtp.a12.devtools/tsconfig@2.0.1':\n"
+                                           "    resolution: {tarball: http://127.0.0.1:4873/tsconfig-2.0.1.tgz}\n")
+
     def test_lock_referencing_unbuilt_local_package_fails(self):
         lock = self.lock("pnpm-lock.yaml", f"""packages:
 
@@ -287,6 +344,88 @@ snapshots:
 """)
         with self.assertRaisesRegex(bootstrap.BootstrapError, "utils-logging@7.0.2.*not built"):
             self.builder.localize_lock(lock)
+
+
+class MetamodelSelectionTests(unittest.TestCase):
+    """The generated metamodels are exactly those the kernel build depends on."""
+
+    def test_selects_referenced_metamodel_artifacts_with_catalog_versions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            kernel = Path(temporary)
+            (kernel / "gradle").mkdir()
+            (kernel / "gradle/libs.versions.toml").write_text('''[versions]
+mmMappingModel_2 = "5.2.561369"
+mmPackage_2 = "3.6.561358"
+
+[libraries]
+kernelMmMappingModel2Typings = { module = "com.mgmtp.a12.kernel:mmtypings-mm_mappingmodel-2", version.ref = "mmMappingModel_2" }
+kernelMmMappingModel2CodegenValidators = { module = "com.mgmtp.a12.kernel:mmvalidators-extmpinternal-mm_mappingmodel-2-codegen", version.ref = "mmMappingModel_2" }
+kernelMmPackage2NoneDmjsons = { module = "com.mgmtp.a12.kernel:mmdmjsons-extmpinternal-mm_package-2-none", version.ref = "mmPackage_2" }
+gson = { module = "com.google.code.gson:gson", version = "2.14.0" }
+''')
+            (kernel / "facade").mkdir()
+            (kernel / "facade/build.gradle").write_text('''dependencies {
+    api libs.kernelMmMappingModel2Typings
+    implementation libs.kernelMmMappingModel2CodegenValidators
+    implementation libs.gson
+    runtimeOnly "com.mgmtp.a12.kernel:mmdmjsons-extmpinternal-mm_smm_fieldtypechecks-1-codegen:4.1.561356"
+}
+''')
+            # Gradle's cache directory is named like a script, and installed npm
+            # packages may ship Gradle files that are not part of the kernel build.
+            (kernel / ".gradle").mkdir()
+            (kernel / "node_modules/some-package").mkdir(parents=True)
+            (kernel / "node_modules/some-package/build.gradle").write_text("api libs.kernelMmPackage2NoneDmjsons\n")
+            self.assertEqual(build_release.kernel_metamodels(kernel), [
+                {"artifact": "mmdmjsons-extmpinternal-mm_smm_fieldtypechecks-1-codegen", "version": "4.1.561356", "kind": "dmjsons"},
+                {"artifact": "mmtypings-mm_mappingmodel-2", "version": "5.2.561369", "kind": "typings"},
+                {"artifact": "mmvalidators-extmpinternal-mm_mappingmodel-2-codegen", "version": "5.2.561369", "kind": "validators"},
+            ])
+
+
+class WorkspaceOverrideTests(unittest.TestCase):
+    """Kit overrides join a workspace's own block at that block's indentation."""
+
+    ADDITIONS = {"semver": "7.8.5", "'@com.mgmtp.a12.devtools/tsconfig'": "2.0.1"}
+
+    def test_follows_the_existing_indentation(self):
+        # a12-antlr4-code-editor ext2 indents its overrides by four spaces.
+        workspace = "packages:\n  - core\noverrides:\n    '@types/react': 19.2.8\nstrictDepBuilds: true\n"
+        self.assertEqual(build_release.add_overrides(workspace, self.ADDITIONS),
+                         "packages:\n  - core\noverrides:\n    semver: 7.8.5\n"
+                         "    '@com.mgmtp.a12.devtools/tsconfig': 2.0.1\n"
+                         "    '@types/react': 19.2.8\nstrictDepBuilds: true\n")
+
+    def test_creates_the_block_when_absent(self):
+        self.assertEqual(build_release.add_overrides("packages:\n  - core\n", {"semver": "7.8.5"}),
+                         "packages:\n  - core\n\noverrides:\n  semver: 7.8.5\n")
+
+
+class ReferenceComparisonTests(unittest.TestCase):
+    """Built jars are compared by entry names with an official distribution's copies."""
+
+    @staticmethod
+    def jar(path, names):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w") as archive:
+            for name in names:
+                archive.writestr(name, "")
+        return path
+
+    def test_reports_entries_missing_or_extra_per_shared_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nested = [self.jar(root / "lib/mmtypings-x-1.0.jar", ["META-INF/MANIFEST.MF", "a/A.class", "a/B.class"]),
+                      self.jar(root / "lib/kernel-y-2.0.jar", ["y/Y.class"]),
+                      self.jar(root / "lib/spring-core-6.0.jar", ["s/S.class"])]
+            with zipfile.ZipFile(root / "app.jar", "w") as app:
+                for jar in nested:
+                    app.write(jar, "BOOT-INF/lib/" + jar.name)
+            self.jar(root / "maven/com/x/mmtypings-x/1.0/mmtypings-x-1.0.jar", ["a/A.class", "a/C.class"])
+            self.jar(root / "maven/com/x/kernel-y/2.0/kernel-y-2.0.jar", ["y/Y.class"])
+            report = compare_reference.compare(root / "app.jar", root / "maven")
+        self.assertEqual(report, {"mmtypings-x-1.0.jar": {"missing": ["a/B.class"], "extra": ["a/C.class"]},
+                                  "kernel-y-2.0.jar": {"missing": [], "extra": []}})
 
 
 def write_tool(path, script):

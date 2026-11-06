@@ -17,7 +17,7 @@ import urllib.request
 import zipfile
 
 KIT = Path(__file__).resolve().parents[1]
-RELEASE_FILE = KIT / "releases" / "2026.06-ext1.json"
+RELEASE_FILE = KIT / "releases" / "2026.06-ext2.json"
 # Where Node.js versions are commonly installed side by side. Used only to suggest
 # a PATH fix; the build itself always uses the `node` found on PATH.
 NODE_SEARCH_PATTERNS = ["/opt/homebrew/opt/node@*/bin", "/usr/local/opt/node@*/bin",
@@ -41,10 +41,23 @@ def load_release():
     for name, commit in release["repositories"].items():
         if not re.fullmatch(r"a12-[a-z0-9-]+", name) or not re.fullmatch(r"[0-9a-f]{40}", commit):
             raise BootstrapError("Invalid repository identity or commit in release manifest")
+    for name, url in release.get("forks", {}).items():
+        if name not in release["repositories"] or not re.fullmatch(r"https://github\.com/[\w.-]+/[\w.-]+\.git", url):
+            raise BootstrapError(f"Invalid fork for {name} in release manifest: it must replace a pinned repository with a GitHub URL")
     return release
 
 
-def prepare_sources(state, repositories):
+def repository_urls(release):
+    """Where each pinned commit is fetched from: mgm-tp, or the fork the manifest names.
+
+    A fork carries corrections a public release export lacks, on top of that release's
+    commit (see UPSTREAM-STATUS.md); the manifest drops it once mgm-tp publishes them.
+    """
+    forks = release.get("forks", {})
+    return {name: forks.get(name, f"https://github.com/mgm-tp/{name}.git") for name in release["repositories"]}
+
+
+def prepare_sources(state, repositories, urls):
     """Build generated source trees, leaving existing project checkouts alone."""
     for name, commit in repositories.items():
         cache = state / "git" / f"{name}.git"
@@ -58,8 +71,11 @@ def prepare_sources(state, repositories):
             raise BootstrapError(f"Refusing to overwrite unmarked source directory: {source}")
         cache.parent.mkdir(parents=True, exist_ok=True)
         if not cache.exists():
-            run(["git", "clone", "--bare", f"https://github.com/mgm-tp/{name}.git", cache])
-        run(["git", f"--git-dir={cache}", "cat-file", "-e", f"{commit}^{{commit}}"])
+            run(["git", "clone", "--bare", urls[name], cache])
+        # A cache cloned earlier, or from the other remote of a fork, may lack the pin.
+        if subprocess.run(["git", f"--git-dir={cache}", "cat-file", "-e", f"{commit}^{{commit}}"],
+                          capture_output=True).returncode:
+            run(["git", f"--git-dir={cache}", "fetch", "--quiet", urls[name], commit])
         source.parent.mkdir(parents=True, exist_ok=True)
         # Extract atomically. Interrupted preparation cannot masquerade as a complete tree.
         with tempfile.TemporaryDirectory(dir=source.parent) as temporary:
@@ -79,10 +95,13 @@ def verify_checksum(archive, checksum):
     expected = fields[0] if fields else ""
     if not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
         raise BootstrapError(f"Invalid SHA-256 checksum: {checksum}")
-    with archive.open("rb") as stream:
-        actual = hashlib.file_digest(stream, "sha256").hexdigest()
-    if actual != expected.lower():
+    if sha256(archive) != expected.lower():
         raise BootstrapError(f"SHA-256 mismatch: {archive}; refusing to use this download")
+
+
+def sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def gradle_binary(state, version):
@@ -215,7 +234,7 @@ def main(argv=None):
     mode.add_argument("--plan", action="store_true", help="show the complete Java and TypeScript build scope without executing it")
     mode.add_argument("--check-upstream", action="store_true", help="show public branch/tag refs without changing the pinned release")
     mode.add_argument("--doctor", action="store_true", help="check the installed build tools and suggest fixes without building")
-    parser.add_argument("--home", type=Path, default=Path(os.environ.get("A12_BOOTSTRAP_HOME", KIT.parent / ".a12-bootstrap" / "2026.06-ext1")))
+    parser.add_argument("--home", type=Path, default=Path(os.environ.get("A12_BOOTSTRAP_HOME", KIT.parent / ".a12-bootstrap" / "2026.06-ext2")))
     args = parser.parse_args(argv)
     release = load_release()
     if args.plan:
@@ -224,16 +243,19 @@ def main(argv=None):
             print(f"{repository}: {manager} {' '.join(tasks)}")
         return
     if args.check_upstream:
-        for name in release["repositories"]:
-            print(f"\n{name} (pinned {release['repositories'][name]})", flush=True)
-            run(["git", "ls-remote", "--heads", "--tags", f"https://github.com/mgm-tp/{name}.git"])
+        for name, url in repository_urls(release).items():
+            print(f"\n{name} (pinned {release['repositories'][name]} from {url})", flush=True)
+            run(["git", "ls-remote", "--heads", "--tags", url])
+            if name in release.get("forks", {}):
+                print(f"{name} upstream (switch back once a release here carries the fork's fixes)", flush=True)
+                run(["git", "ls-remote", "--heads", "--tags", f"https://github.com/mgm-tp/{name}.git"])
         return
     state = args.home.resolve()
     if args.doctor:
         doctor(release, state, os.environ.copy())
         return
     state.mkdir(parents=True, exist_ok=True)
-    prepare_sources(state, release["repositories"])
+    prepare_sources(state, release["repositories"], repository_urls(release))
     if args.prepare:
         print(f"Prepared {len(release['repositories'])} pinned source trees in {state / 'sources'}; no build was run.")
         return

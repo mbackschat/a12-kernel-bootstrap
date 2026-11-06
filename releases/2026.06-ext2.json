@@ -1,0 +1,31 @@
+{
+  "release": "2026.06-ext2",
+  "kernel_version": "31.3.1",
+  "base_version": "30.1.1",
+  "runtime_api_version": "33.2.1",
+  "customfieldtype_api_version": "29.0.2",
+  "wcf_api_version": "1.1.3",
+  "gradle_version": "9.8.2",
+  "pnpm_version": "12.3.4",
+  "pnpm_overrides": {
+    "a12-devtools": "11.17.0",
+    "a12-utils": "11.17.0"
+  },
+  "repositories": {
+    "a12-kernel": "6363abf6686483a0128f72dca1ab3cfb5ba36bbe",
+    "a12-base": "bb4298853621e52dc5127ea1aea0001d373d47bc",
+    "a12-kernel-mm": "499dc0b19b8c19bfb77dd3c1cf49ac73af7a46aa",
+    "a12-devtools": "9eadbdbe1f953edc507b51a7e90dff1ed41dcacc",
+    "a12-utils": "1ac7ea3e30e3008158a4797a5eda2f86a2c778be",
+    "a12-localization": "0e2125032540bc196861aef803e3924ece7f8808",
+    "a12-logging": "5b5277a30cf79f06fa84ecee2d95a794f476a5e8",
+    "a12-kernel-antlr4": "9ef99fa551b7ac1e81c2e169405b0e5f12b44763",
+    "a12-antlr4-code-editor": "b172eb288208de176beb7bc47e87b3ed30630bb7",
+    "a12-dataservices-wcf": "aa7b29ce91d0eb46f4af65f36b6c49bdc8b3585e"
+  },
+  "forks": {
+    "a12-kernel": "https://github.com/mbackschat/a12-kernel-fixes.git",
+    "a12-kernel-mm": "https://github.com/mbackschat/a12-kernel-mm-fixes.git",
+    "a12-base": "https://github.com/mbackschat/a12-base-fixes.git"
+  }
+}

@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -39,6 +40,48 @@ def merge_version_index(source, target):
         versioning.find(tag).text = new.find(tag).text
     ElementTree.indent(merged, '  ')
     merged.write(target, xml_declaration=True, encoding='UTF-8')
+
+
+# Committed locks name this loopback address; each run rebinds it to its own registry.
+LOCK_REGISTRY = 'http://127.0.0.1:4873/'
+METAMODEL_ARTIFACT = re.compile(r'mm(typings|dmjsons|validators)-[a-z0-9_.-]+')
+
+
+def kernel_metamodels(kernel):
+    """List the metamodel artifacts the kernel build depends on, at its catalog versions.
+
+    Only referenced catalog entries count: the kernel catalog also names metamodels
+    (e.g. MM_Package) that no kernel module uses and the public export does not contain.
+    """
+    catalog = tomllib.loads((kernel / 'gradle/libs.versions.toml').read_text())
+    scripts = '\n'.join(path.read_text() for path in kernel.rglob('*.gradle') if path.is_file()
+                        and not {'node_modules', '.gradle', 'build'} & set(path.relative_to(kernel).parts[:-1]))
+    referenced = set(re.findall(r'\blibs\.([A-Za-z0-9]+)\b', scripts))
+    found = {}
+    for alias, library in catalog['libraries'].items():
+        if isinstance(library, str):  # "group:artifact:version" shorthand
+            library = dict(zip(['group', 'name', 'version'], library.split(':')))
+        elif 'module' in library:
+            library = library | dict(zip(['group', 'name'], library['module'].split(':')))
+        version = library.get('version')
+        if isinstance(version, dict):
+            version = catalog['versions'][version['ref']]
+        if alias in referenced and library['group'] == 'com.mgmtp.a12.kernel' and METAMODEL_ARTIFACT.fullmatch(library['name']):
+            found[library['name']] = version
+    for artifact, version in re.findall(r'["\']com\.mgmtp\.a12\.kernel:(mm(?:typings|dmjsons|validators)-[a-z0-9_.-]+):([^"\']+)["\']', scripts):
+        found[artifact] = version
+    return [{'artifact': artifact, 'version': found[artifact], 'kind': METAMODEL_ARTIFACT.fullmatch(artifact)[1]}
+            for artifact in sorted(found)]
+
+
+def add_overrides(workspace, additions):
+    """Put additions first in pnpm-workspace.yaml's overrides block, at the block's own indentation."""
+    block = re.search(r'^overrides:\n([ \t]+)', workspace, flags=re.M)
+    indent = block[1] if block else '  '
+    entries = ''.join(f'{indent}{name}: {version}\n' for name, version in additions.items())
+    if block:
+        return workspace[:block.start(1)] + entries + workspace[block.start(1):]
+    return workspace + '\noverrides:\n' + entries
 
 
 class ReleaseBuilder:
@@ -73,23 +116,25 @@ class ReleaseBuilder:
                     'show', f'{self.release["repositories"][repo]}:{filename}'], capture=True) + '\n'
 
     def prepare_java(self):
-        # Apply the small, reviewable ext1 compatibility corrections once. Never
-        # overwrite unrelated edits in an existing generated source tree.
-        cwd = self.sources / 'a12-kernel'
-        for patch in sorted((KIT / 'build-support').glob('ext1-*.patch')):
-            applied = subprocess.run(['git', 'apply', '--reverse', '--check', str(patch)],
-                                     cwd=cwd, capture_output=True).returncode == 0
-            if not applied:
-                run(['git', 'apply', '--check', patch], cwd=cwd)
-                run(['git', 'apply', patch], cwd=cwd)
         for name in ['java', 'wcf', 'smoke']:
             target = self.state / (name + '-bootstrap')
             for source in (KIT / 'build-support' / name).rglob('*'):
                 if source.is_file():
                     write_changed(target / source.relative_to(KIT / 'build-support' / name), source.read_text())
-        self.specs = json.loads((KIT / 'build-support/java/metamodels.json').read_text())
+        kernel = self.sources / 'a12-kernel'
+        self.specs = kernel_metamodels(kernel)
+        write_changed(self.state / 'java-bootstrap/metamodels.json', json.dumps(self.specs, indent=2) + '\n')
         for name in ['typed-generator', 'validator-generator'] + [s['artifact'] for s in self.specs]:
             (self.state / 'java-bootstrap' / name).mkdir(exist_ok=True)
+        # The bootstrap Gradle builds take every version from the manifest or the
+        # kernel catalog, so a release upgrade does not edit them.
+        catalog = tomllib.loads((kernel / 'gradle/libs.versions.toml').read_text())
+        self.runtime = catalog['libraries']['a12KernelRuntimeArtifactId']['module'].split(':')[1]
+        self.env |= {'A12_KERNEL_VERSION': self.release['kernel_version'],
+                     'A12_KERNEL_RUNTIME': self.runtime,
+                     'A12_BASE_VERSION': self.release['base_version'],
+                     'A12_RUNTIME_API_VERSION': self.release['runtime_api_version'],
+                     'A12_WCF_API_VERSION': self.release['wcf_api_version']}
 
     def build_java_dependencies(self):
         self.prepare_java()
@@ -106,18 +151,20 @@ class ReleaseBuilder:
         self.java('metamodel-types', self.state / 'java-bootstrap',
                   *[':' + s['artifact'] + ':publishToMavenLocal' for s in self.specs if s['kind'] != 'validators'])
         seed_env = self.env | {'A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION': 'true'}
-        common = ':mmvalidators-extmpinternal-mm_common-v2-codegen:publishToMavenLocal'
-        common_jar = self.state / 'maven/com/mgmtp/a12/kernel/mmvalidators-extmpinternal-mm_common-v2-codegen/20.1.551424/mmvalidators-extmpinternal-mm_common-v2-codegen-20.1.551424.jar'
+        common = next(s for s in self.specs if s['artifact'] == 'mmvalidators-extmpinternal-mm_common-v2-codegen')
+        common_jar = (self.state / 'maven/com/mgmtp/a12/kernel' / common['artifact'] / common['version']
+                      / f"{common['artifact']}-{common['version']}.jar")
+        task = f":{common['artifact']}:publishToMavenLocal"
         if not common_jar.exists():
-            self.java('common-validator-seed', self.state / 'java-bootstrap', common, env=seed_env)
+            self.java('common-validator-seed', self.state / 'java-bootstrap', task, env=seed_env)
         # This second pass is mandatory: validation is enabled and the generated
         # validator must successfully validate the input to its own generator.
-        self.java('common-validator-validated', self.state / 'java-bootstrap', common)
+        self.java('common-validator-validated', self.state / 'java-bootstrap', task)
         self.java('metamodel-validators', self.state / 'java-bootstrap',
                   *[':' + s['artifact'] + ':publishToMavenLocal' for s in self.specs if s['kind'] == 'validators'])
         self.java('runtime-publications', self.sources / 'a12-kernel',
                   *[':' + name + ':publishToMavenLocal' for name in ['kernel-core-customfieldtype-api',
-                    'kernel-core-runtime-api', 'kernel-conversion-java', 'kernel-core-runtime-31-1']])
+                    'kernel-core-runtime-api', 'kernel-conversion-java', self.runtime]])
 
     def install_tool(self, package, version, binary):
         prefix = self.state / 'tools' / f'{package}-{version}'
@@ -198,7 +245,7 @@ log: {type: stdout, format: pretty, level: warn}
         # Keep each selected package's actual dependencies and native build scripts.
         package['devDependencies'] = {}
         package['scripts'] = {}
-        package['packageManager'] = 'pnpm@11.17.0'
+        package['packageManager'] = 'pnpm@' + self.pnpm_version(repo)
         write_changed(root / 'package.json', json.dumps(package, indent=2) + '\n')
         workspace = self.original(repo, 'pnpm-workspace.yaml')
         workspace = re.sub(r'packages:\n(?:[ \t].*\n|\n)*',
@@ -206,10 +253,10 @@ log: {type: stdout, format: pretty, level: warn}
         # These upstream patches target unrelated editor examples / ESLint tools,
         # which are not in this dependency workspace.
         workspace = re.sub(r'patchedDependencies:\n(?:[ \t].*\n|\n)*', '', workspace)
-        additions = '  semver: 7.8.5\n  chokidar: 4.0.1\n'
+        additions = {'semver': '7.8.5', 'chokidar': '4.0.1'}
         if repo == 'a12-antlr4-code-editor':
-            additions += "  '@com.mgmtp.a12.devtools/tsconfig': 2.0.1\n"
-        workspace = workspace.replace('overrides:\n', 'overrides:\n' + additions) if 'overrides:\n' in workspace else workspace + '\noverrides:\n' + additions
+            additions["'@com.mgmtp.a12.devtools/tsconfig'"] = '2.0.1'
+        workspace = add_overrides(workspace, additions)
         write_changed(root / 'pnpm-workspace.yaml', workspace)
         lock = KIT / 'build-support/locks' / repo / 'pnpm-lock.yaml'
         if lock.exists():
@@ -217,9 +264,16 @@ log: {type: stdout, format: pretty, level: warn}
         elif (root / 'pnpm-lock.yaml').exists() and not (root / '.bootstrap-workspace').exists():
             (root / 'pnpm-lock.yaml').rename(root / 'pnpm-lock.yaml.upstream')
         (root / '.bootstrap-workspace').touch()
-        self.stage(repo + '-install', [self.pnpm, 'install', '--config.manage-package-manager-versions=false',
-                   '--frozen-lockfile' if lock.exists() else '--no-frozen-lockfile',
-                   '--store-dir', self.state / 'pnpm-store'], cwd=root)
+        locked = lock.exists()
+        self.stage(repo + '-install', [self.pnpm(repo), 'install', '--config.manage-package-manager-versions=false',
+                   '--frozen-lockfile' if locked else '--no-frozen-lockfile'], cwd=root)
+        if not locked:
+            self.record_lock(root / 'pnpm-lock.yaml', lock)
+
+    def record_lock(self, resolved, kept):
+        """Keep a freshly resolved lock in the kit; deleting a kit lock is how a release refreshes it."""
+        write_changed(kept, resolved.read_text().replace(self.registry_url, LOCK_REGISTRY))
+        print(f'Recorded new lock {kept}; review and commit it', flush=True)
 
     def localize_lock(self, path):
         # The committed loopback address is a placeholder, not a hosted registry.
@@ -227,7 +281,7 @@ log: {type: stdout, format: pretty, level: warn}
         # platform dependent (the header alone records the OS), so a hash recorded
         # on the lock author's machine cannot match. Bind those entries to the
         # tarballs built here; every third-party integrity stays locked.
-        text = path.read_text().replace('http://127.0.0.1:4873/', self.registry_url)
+        text = path.read_text().replace(LOCK_REGISTRY, self.registry_url)
 
         def built(name, version):
             try:
@@ -248,7 +302,7 @@ log: {type: stdout, format: pretty, level: warn}
     def package(self, repo, package, pnpm=True):
         root = self.sources / repo
         self.stage(repo + '-' + package.replace('/', '-') + '-pack',
-                   [self.pnpm, '--filter', './' + package, 'pack', '--pack-destination', self.artifacts]
+                   [self.pnpm(repo), '--filter', './' + package, 'pack', '--pack-destination', self.artifacts]
                    if pnpm else ['npm', 'pack', '--pack-destination', self.artifacts],
                    cwd=root if pnpm else root / package)
         data = json.loads((root / package / 'package.json').read_text())
@@ -268,25 +322,35 @@ log: {type: stdout, format: pretty, level: warn}
         self.stage(repo + '-' + package.replace('/', '-') + '-publish-local',
                    ['npm', 'publish', tarball, '--registry', self.registry_url, '--tag', 'bootstrap'])
 
+    def pnpm_version(self, repo):
+        return self.release.get('pnpm_overrides', {}).get(repo, self.release['pnpm_version'])
+
+    def pnpm(self, repo):
+        """The pinned pnpm for one repository's workspace (see pnpm_overrides in the manifest)."""
+        return self.install_tool('pnpm', self.pnpm_version(repo), 'pnpm')
+
     def provision_pnpm(self):
         # Java stages need pnpm too: the devtools integration plugin's tests run
         # `pnpm list` from PATH, and hosted CI runners carry no pnpm of their own.
-        self.pnpm = self.install_tool('pnpm', '11.17.0', 'pnpm')
-        self.env['PATH'] = str(self.pnpm.parent) + os.pathsep + self.env['PATH']
+        # Its plugins are the PATH consumer, so they get devtools' own pnpm major.
+        self.env['PATH'] = str(self.pnpm('a12-devtools').parent) + os.pathsep + self.env['PATH']
         self.env['npm_config_manage_package_manager_versions'] = 'false'
+        # pnpm 11+ reads pnpm_config_* (not npm_config_*). Setting the store for every
+        # call keeps `pnpm run`/`pack` from relinking node_modules from the user's store.
+        self.env['pnpm_config_store_dir'] = str(self.state / 'pnpm-store')
 
     def build_typescript_dependencies(self):
         packages = ['packages/build-tools', 'packages/eslint-config', 'packages/prettier-config', 'packages/tsconfig']
         self.prepare_workspace('a12-devtools', packages)
-        self.stage('devtools-ts-compile', [self.pnpm, '-r', 'run', 'compile'], cwd=self.sources / 'a12-devtools')
-        self.stage('devtools-ts-test', [self.pnpm, '--filter', './packages/build-tools', 'test'], cwd=self.sources / 'a12-devtools')
+        self.stage('devtools-ts-compile', [self.pnpm('a12-devtools'), '-r', 'run', 'compile'], cwd=self.sources / 'a12-devtools')
+        self.stage('devtools-ts-test', [self.pnpm('a12-devtools'), '--filter', './packages/build-tools', 'test'], cwd=self.sources / 'a12-devtools')
         for package in packages:
             self.package('a12-devtools', package)
         for repo, package, script in [('a12-utils', 'collections', 'build'), ('a12-logging', 'core', 'build'),
                 ('a12-localization', 'localization', 'build'), ('a12-base', 'model-api-ts', 'build')]:
             self.prepare_workspace(repo, [package])
             for task in [script, 'test']:
-                self.stage(repo + '-ts-' + task, [self.pnpm, '--filter', './' + package, 'run', task], cwd=self.sources / repo)
+                self.stage(repo + '-ts-' + task, [self.pnpm(repo), '--filter', './' + package, 'run', task], cwd=self.sources / repo)
             self.package(repo, package)
         antlr = self.sources / 'a12-kernel-antlr4/runtime/JavaScript'
         self.stage('antlr-install', ['npm', 'ci', '--no-audit', '--no-fund'], cwd=antlr)
@@ -295,7 +359,7 @@ log: {type: stdout, format: pretty, level: warn}
         self.package('a12-kernel-antlr4', 'runtime/JavaScript', pnpm=False)
         self.prepare_workspace('a12-antlr4-code-editor', ['antlrcodeeditor-core'])
         for task in ['prepare-lib:gen', 'prepare-lib:correct', 'build', 'test']:
-            self.stage('editor-' + task.replace(':', '-'), [self.pnpm, '--filter', './antlrcodeeditor-core', 'run', task],
+            self.stage('editor-' + task.replace(':', '-'), [self.pnpm('a12-antlr4-code-editor'), '--filter', './antlrcodeeditor-core', 'run', task],
                        cwd=self.sources / 'a12-antlr4-code-editor')
         self.package('a12-antlr4-code-editor', 'antlrcodeeditor-core')
 
@@ -312,7 +376,12 @@ log: {type: stdout, format: pretty, level: warn}
             if kernel_lock.exists():
                 write_changed(self.sources / 'a12-kernel/package-lock.json', self.localize_lock(kernel_lock))
                 self.stage('kernel-locked-install', ['npm', 'ci', '--no-audit', '--no-fund'], cwd=self.sources / 'a12-kernel')
-            self.java('kernel-full-build', self.sources / 'a12-kernel', 'build', 'test', 'publishToMavenLocal', 'npm_pack')
+            else:
+                self.stage('kernel-install', ['npm', 'install', '--no-audit', '--no-fund'], cwd=self.sources / 'a12-kernel')
+                self.record_lock(self.sources / 'a12-kernel/package-lock.json', kernel_lock)
+            # --continue reports every failing module at once; the stage still fails.
+            self.java('kernel-full-build', self.sources / 'a12-kernel', '-I', KIT / 'build-support/kernel-projects.init.gradle',
+                      '--continue', 'build', 'test', 'publishToMavenLocal', 'npm_pack')
             self.java('java-release-smoke', self.state / 'smoke-bootstrap', 'run')
             self.check_typescript_artifacts()
         ready.write_text(json.dumps({'release': self.release, 'maven': str(self.state / 'maven'),

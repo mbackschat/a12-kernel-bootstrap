@@ -17,7 +17,7 @@ import com.mgmtp.a12.model.notification.Severity;
 /** Minimal build entry point for upstream's generator, avoiding the facade/metamodel cycle. */
 public final class GenerateValidators {
     public static void main(String[] args) throws Exception {
-        if (args.length != 4) throw new IllegalArgumentException("Expected model.json output-directory package-name variant");
+        if (args.length != 3) throw new IllegalArgumentException("Expected model.json output-directory package-name");
         var config = new IValidationCodeGeneratorConfig() {
             public ProgrammingLanguage getProgrammingLanguage() { return ProgrammingLanguage.JAVA; }
             public Optional<String> getPackageName() { return Optional.of(args[2]); }
@@ -26,11 +26,6 @@ public final class GenerateValidators {
         byte[] archive;
         try (var reader = Files.newBufferedReader(Path.of(args[0]), StandardCharsets.UTF_8)) {
             var model = new DocumentModelSerializerImpl().deserialize(reader);
-            // ext1 removed the CLI's -vn option, while kernel consumers still
-            // require variant-qualified generated identifiers. Supply that build
-            // namespace through the model name; IDs, fields and rules stay intact.
-            var info = ExternalDocumentModelService.getInternDocumentModel(model).getContent().getModelInfo();
-            info.setName(args[3] + "_" + info.getName());
             archive = new ExternalDocumentModelService().generateValidationCode(model, config, null, notifications::add);
         }
         if (archive == null || notifications.stream().anyMatch(n -> n.getSeverity() == Severity.ERROR)) {

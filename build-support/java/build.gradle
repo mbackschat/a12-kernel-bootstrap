@@ -10,11 +10,17 @@ buildscript {
 }
 
 def kernel = new File(System.getenv('A12_KERNEL_DIR'))
+// Versions come from the release manifest and the kernel catalog (see build_release.py).
+def kernelVersion = System.getenv('A12_KERNEL_VERSION')
+def kernelRuntime = "com.mgmtp.a12.kernel:${System.getenv('A12_KERNEL_RUNTIME')}:${kernelVersion}"
+def baseUtils = "com.mgmtp.a12.base:base-model-utils:${System.getenv('A12_BASE_VERSION')}"
 def mm = new File(System.getenv('A12_MM_DIR'))
 def specs = new JsonSlurper().parse(file('metamodels.json'))
 def typingConfigs = MmCatalog.INSTANCE.typingsProjConfigs(mm)
 def validatorConfigs = MmCatalog.INSTANCE.validatorsProjConfigs(mm)
 def jsonConfigs = MmCatalog.INSTANCE.dmjsonsProjConfigs(mm)
+def extVersion = (new File(mm, 'libs.versions.toml').text =~ /(?m)^extVersion\s*=\s*"(\d+)"/)[0][1]
+def common = specs.find { it.artifact == 'mmvalidators-extmpinternal-mm_common-v2-codegen' }
 
 subprojects {
     apply plugin: 'java-library'
@@ -45,16 +51,16 @@ subprojects {
 
 project(':typed-generator') {
     group = 'local.a12.bootstrap'
-    version = '31.1.1'
+    version = kernelVersion
     sourceSets.main.java {
-        srcDir new File(kernel, 'kernel-md/kernel-md-facade/src/main/java')
+        srcDir new File(kernel, 'kernel-md-facade/src/main/java')
         include 'com/mgmtp/a12/kernel/md/document/typed_accessor_gen/**'
     }
     dependencies {
-        implementation 'com.mgmtp.a12.kernel:kernel-md-serializer:31.1.1'
-        implementation 'com.mgmtp.a12.kernel:kernel-md-documentmodel:31.1.1'
-        implementation 'com.mgmtp.a12.kernel:kernel-internal-base-utils:31.1.1'
-        implementation 'com.mgmtp.a12.base:base-model-utils:30.0.2'
+        implementation "com.mgmtp.a12.kernel:kernel-md-serializer:${kernelVersion}"
+        implementation "com.mgmtp.a12.kernel:kernel-md-documentmodel:${kernelVersion}"
+        implementation "com.mgmtp.a12.kernel:kernel-internal-base-utils:${kernelVersion}"
+        implementation baseUtils
         implementation 'commons-cli:commons-cli:1.11.0'
         implementation 'org.apache.commons:commons-text:1.15.0'
         implementation 'org.antlr:ST4:4.3.4'
@@ -62,26 +68,26 @@ project(':typed-generator') {
 }
 project(':validator-generator') {
     group = 'local.a12.bootstrap'
-    version = '31.1.1'
+    version = kernelVersion
     dependencies {
-        implementation 'com.mgmtp.a12.kernel:kernel-internal-md-model:31.1.1'
-        runtimeOnly 'com.mgmtp.a12.kernel:kernel-core-runtime-31-1:31.1.1'
+        implementation "com.mgmtp.a12.kernel:kernel-internal-md-model:${kernelVersion}"
+        runtimeOnly kernelRuntime
     }
 }
 
 specs.each { spec ->
     project(":${spec.artifact}") {
         version = spec.version
-        def cfg = (spec.kind == 'typings' ? typingConfigs : spec.kind == 'validators' ? validatorConfigs : jsonConfigs)[spec.sourceArtifact]
-        if (cfg == null) throw new GradleException("No exported metamodel configuration for ${spec.sourceArtifact}")
+        def cfg = (spec.kind == 'typings' ? typingConfigs : spec.kind == 'validators' ? validatorConfigs : jsonConfigs)[spec.artifact]
+        if (cfg == null) throw new GradleException("No exported metamodel configuration for ${spec.artifact}")
         def label = UtilsKt.labelFromVersion(version.toString())
         def input = UtilsKt.getDocumentModelPath(mm, cfg.modelName, cfg.version, label, cfg.variant, cfg.isSpecialBulkVariation)
         if (spec.kind == 'typings') {
             configurations { generator }
             dependencies {
                 generator project(':typed-generator')
-                api 'com.mgmtp.a12.kernel:kernel-md-document-v2:31.1.1'
-                compileOnly 'com.mgmtp.a12.base:base-model-utils:30.0.2'
+                api "com.mgmtp.a12.kernel:kernel-md-document-v2:${kernelVersion}"
+                compileOnly baseUtils
                 cfg.externalIncludes.each { inc -> api project(inc.depProjPath.replace(':mmtypings:', ':')) }
             }
             def model = layout.buildDirectory.file('input/model.json')
@@ -118,10 +124,10 @@ specs.each { spec ->
             dependencies {
                 generator project(':validator-generator')
                 if (System.getenv('A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION') != 'true') {
-                    generator files("${System.getProperty('maven.repo.local')}/com/mgmtp/a12/kernel/mmvalidators-extmpinternal-mm_common-v2-codegen/20.1.551424/mmvalidators-extmpinternal-mm_common-v2-codegen-20.1.551424.jar")
+                    generator files("${System.getProperty('maven.repo.local')}/com/mgmtp/a12/kernel/${common.artifact}/${common.version}/${common.artifact}-${common.version}.jar")
                 }
-                api 'com.mgmtp.a12.kernel:kernel-core-runtime-api:33.0.2'
-                implementation 'com.mgmtp.a12.kernel:kernel-core-runtime-31-1:31.1.1'
+                api "com.mgmtp.a12.kernel:kernel-core-runtime-api:${System.getenv('A12_RUNTIME_API_VERSION')}"
+                implementation kernelRuntime
             }
             def generate = tasks.register('generate', JavaExec) {
                 classpath = configurations.generator
@@ -130,13 +136,14 @@ specs.each { spec ->
                 inputs.file(input)
                 inputs.property('bootstrapSeed', System.getenv('A12_KERNEL_BOOTSTRAP_VALIDATORS_DISABLE_MM_VALIDATION') ?: 'false')
                 outputs.dir(output)
-                args input, output.get().asFile, cfg.packagePrefix(), cfg.variant
+                args input, output.get().asFile, cfg.packagePrefix()
                 doFirst {
                     delete output
                     output.get().asFile.mkdirs()
                 }
             }
-            sourceSets.main.java.srcDir(generate)
+            // Since A12K-3621 the generator nests its sources below src/main/java (upstream mm-validators-conventions).
+            sourceSets.main.java.srcDir(files(layout.buildDirectory.dir('generated/java/src/main/java')).builtBy(generate))
         } else {
             def copyModels = tasks.register('copyModels', Copy) {
                 def prefix = cfg.visibility.resourcePrefix()
@@ -144,8 +151,13 @@ specs.each { spec ->
                 into layout.buildDirectory.dir('generated/resources')
                 from(input) { into prefix; rename { resourceName } }
                 from(input) { into prefix }
+                // Copies named after the extension release, as upstream's mm-dmjsons-conventions publishes them.
+                from(input) { into prefix; rename { UtilsKt.dmResourceFileNameWithExtVersion(cfg.variant, cfg.modelName, cfg.version, label, extVersion, cfg.isSpecialBulkVariation) } }
                 def previous = new File(input.parentFile, input.name.replace('.json', '-previous.json'))
-                if (previous.exists()) { from(previous) { into prefix } }
+                if (previous.exists()) {
+                    from(previous) { into prefix }
+                    from(previous) { into prefix; rename { UtilsKt.dmResourceFileNameWithExtVersion(cfg.variant, cfg.modelName, cfg.version, label, UtilsKt.getPreVersion(extVersion), cfg.isSpecialBulkVariation) } }
+                }
             }
             sourceSets.main.resources.srcDir(copyModels)
         }

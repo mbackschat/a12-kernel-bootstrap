@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -38,8 +38,9 @@ test('custom field validation accepts a valid IBAN and rejects a changed checksu
 });
 
 test('facade deserializes an exported metamodel and resolves its root group', async () => {
-  const source = await readFile(join(process.env.A12_MM_DIR,
-    'documentModels/CT_FIELD_TYPE_ATTRIBUTES_1/a12types-ct_field_type_attributes-1-3.1.json'), 'utf8');
+  const directory = join(process.env.A12_MM_DIR, 'documentModels/CT_FIELD_TYPE_ATTRIBUTES_1');
+  const [name] = (await readdir(directory)).filter(file => /^a12types-.*\d\.json$/.test(file));
+  const source = await readFile(join(directory, name), 'utf8');
   const raw = JSON.parse(source);
   const factory = new facade.DocumentServiceFactory();
   const model = factory.getDocumentModelSerializer().deserialize(source);

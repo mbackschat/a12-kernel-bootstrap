@@ -1,13 +1,10 @@
 # a12-kernel-bootstrap
 
-Build **A12 2026.06-ext1 / kernel 31.1.1** from pinned public sources, including
-Java, TypeScript, structural mapping, workspace conversion, code generation,
-CLI jars, Maven publications and npm tarballs.
+Build **A12 2026.06-ext2 / kernel 31.3.1** from pinned public sources, including Java, TypeScript, structural mapping, workspace conversion, code generation, CLI jars, Maven publications and npm tarballs.
 
-The old build-utilities stub, obsolete metamodel patch and Java-only staging
-build are removed. The bootstrap builds the real upstream prerequisites and
-all projects selected by the kernel's release settings. Small remaining
-compatibility fixes are documented in [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md).
+The old build-utilities stub, obsolete metamodel patch and Java-only staging build are removed. The bootstrap builds the real upstream prerequisites and all projects selected by the kernel's release settings.
+
+The public ext2 exports of a12-kernel, a12-kernel-mm and a12-base cannot be built as published (a missing metamodel, wrong dependency versions). Until mgm-tp publishes fixed releases, those three repositories are fetched from temporary public forks (`mbackschat/<repo>-fixes`, branch `2026.06-ext2-fixes`), each mgm-tp's release commit plus one commit per correction. This repository itself contains no A12 sources, patches or artifacts. [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md) lists every fork commit and why it is needed.
 
 ## Build
 
@@ -22,21 +19,16 @@ Check the toolchain first. `--doctor` reports each prerequisite as OK or MISSING
 
 `bootstrap.sh` uses `python3` when it is 3.12+, otherwise the newest `python3.N` on PATH. JDKs are found through `JAVA21_HOME` / `JAVA25_HOME`, `JAVA_HOME`, or on macOS `/usr/libexec/java_home`; set the variables to select specific installations.
 
-Gradle 9.8.2 is downloaded from its official distribution and checked against its
-published SHA-256. `GRADLE_BIN` can select an existing installation of the
-version pinned in [the release manifest](releases/2026.06-ext1.json).
+Gradle 9.8.2 is downloaded from its official distribution and checked against its published SHA-256. `GRADLE_BIN` can select an existing installation of the version pinned in [the release manifest](releases/2026.06-ext2.json).
 
-By default, state is kept in `../.a12-bootstrap/2026.06-ext1`. Override it with
-`A12_BOOTSTRAP_HOME` or `--home /path/to/state`. Existing project checkouts are
-not modified. Git caches and generated source trees live under that directory;
-a changed source pin requires a new state directory.
+By default, state is kept in `../.a12-bootstrap/2026.06-ext2`. Override it with `A12_BOOTSTRAP_HOME` or `--home /path/to/state`. Existing project checkouts are not modified. Git caches and generated source trees live under that directory; a changed source pin requires a new state directory.
 
 ```bash
 ./bootstrap.sh --doctor           # check installed tools, suggest fixes
 ./bootstrap.sh --plan             # show the scope
 ./bootstrap.sh --prepare          # fetch/extract sources without building
-./bootstrap.sh --check-upstream   # inspect public refs without changing pins
-python3 -m unittest discover -s tests -v
+./bootstrap.sh --check-upstream   # inspect public refs (forks and their mgm-tp upstream) without changing pins
+python3.13 -m unittest discover -s tests -v
 ```
 
 ## Outputs and verification
@@ -49,9 +41,11 @@ A successful run writes `build-success.json` only after building and checking th
 | `npm-artifacts/` | Five kernel TypeScript packages and their source-built prerequisites |
 | `logs/` | Build, test and functional-check output for each stage |
 | `npm-smoke/` | Independent consumer installation of the built kernel tarballs |
-| `sources/` | Pinned upstream exports with documented build integration applied |
+| `sources/` | Pinned exports of the mgm-tp repositories and the fix forks |
 
 The bootstrap uses a temporary npm registry bound to loopback to resolve the source-built A12 packages. It stops that process on exit and never publishes to a public registry. TLS, downloaded artifact checksums and upstream dependency trust policies remain enabled.
+
+With an official A12 Tools bundle of the same release at hand, `python3.13 scripts/compare_reference.py <bundle>/bin/preview-app-server/<v>/previewapp-server-<v>.jar <state>/maven` compares the built kernel and metamodel jars with the shipped ones by entry names. UPSTREAM-STATUS.md explains the two expected differences.
 
 ### Local Maven repository (`~/.m2`)
 
@@ -63,30 +57,14 @@ The install follows `publishToMavenLocal` semantics: files of this release's coo
 
 **Issue fixed.** The first 2026.06-ext1 version of this kit (commit 70e6b58) isolated the build but never delivered the result: artifacts stayed in `<state>/maven`, and consumers had to point `-Dmaven.repo.local` at it, unlike the 2025.06 kit, which published to `~/.m2`. Using that state repository as a consumer's local repository also mixes the consumer's own downloads and installs into the release output.
 
-Validation includes the prerequisite libraries' available tests, mandatory
-regeneration of the common validator with metamodel validation enabled, and
-the kernel's native `build`, `test`, `publishToMavenLocal` and `npm_pack` tasks.
-The public kernel export has no runnable Java or TypeScript unit-test suites;
-its standalone `npm_test` tasks fail because their test directories are absent.
-The bootstrap therefore also runs its own functional checks against the
-published Java artifacts and installed npm tarballs: compatible/incompatible
-structural mapping, workspace conversion, date comparisons, localization,
-IBAN validation, model deserialization/search, and generated lexer behavior.
-These checks are release integration tests, not a claim that unpublished
-upstream test suites ran.
+Validation includes the prerequisite libraries' available tests, mandatory regeneration of the common validator with metamodel validation enabled, and the kernel's native `build`, `test`, `publishToMavenLocal` and `npm_pack` tasks. The public kernel export has no runnable Java or TypeScript unit-test suites; its standalone `npm_test` tasks fail because their test directories are absent. The bootstrap therefore also runs its own functional checks against the published Java artifacts and installed npm tarballs: compatible/incompatible structural mapping, workspace conversion, date comparisons, localization, IBAN validation, model deserialization/search, and generated lexer behavior. These checks are release integration tests, not a claim that unpublished upstream test suites ran.
 
-Supporting repositories are built for the libraries required by this kernel
-release. Their unrelated documentation applications, codemods and example
-applications are not part of the kernel release. The sibling demo repository
-is not rewritten by this script.
+Supporting repositories are built for the libraries required by this kernel release. Their unrelated documentation applications, codemods and example applications are not part of the kernel release. The sibling demo repository is not rewritten by this script.
 
 ## Reproducibility
 
-[releases/2026.06-ext1.json](releases/2026.06-ext1.json) records the public Git commits and release versions. The dependency lockfiles in `build-support/locks/` are installed with frozen/CI checks. Their loopback URL is rebound to the temporary local registry, and the integrity of each A12 package built by this run is bound to the tarball it just packed: gzip output is platform dependent (its header alone records the OS), so a hash recorded on another machine cannot match. A lock that names an A12 package the run has not built fails the build. Every third-party integrity hash stays locked.
+[releases/2026.06-ext2.json](releases/2026.06-ext2.json) records the Git commits (mgm-tp's, or a fork's where its `forks` map says so) and release versions. The dependency lockfiles in `build-support/locks/` are installed with frozen/CI checks. Their loopback URL is rebound to the temporary local registry, and the integrity of each A12 package built by this run is bound to the tarball it just packed: gzip output is platform dependent (its header alone records the OS), so a hash recorded on another machine cannot match. A lock that names an A12 package the run has not built fails the build. Every third-party integrity hash stays locked.
 
-Generated sources reuse the upstream metamodel catalog and the actual ext1 generators. The initial common-validator seed is followed by a required validated pass; a seed alone never marks a build complete.
+Generated sources reuse the upstream metamodel catalog and this release's generators. The initial common-validator seed is followed by a required validated pass; a seed alone never marks a build complete.
 
-Set `A12_GRADLE_USER_HOME` to reuse a configured Gradle cache or proxy setup.
-Otherwise the bootstrap uses its own `gradle-home/`. Java tools may need proxy
-and trust-store configuration in restricted environments; no credentials are
-required for the public source workflow.
+Set `A12_GRADLE_USER_HOME` to reuse a configured Gradle cache or proxy setup. Otherwise the bootstrap uses its own `gradle-home/`. Java tools may need proxy and trust-store configuration in restricted environments; no credentials are required for the public source workflow.
