@@ -1,0 +1,77 @@
+name: Public release and consumer
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      bootstrap-ref:
+        required: true
+        type: string
+      demo-ref:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      A12_BOOTSTRAP_HOME: ${{ github.workspace }}/.a12-release
+      npm_config_userconfig: /dev/null
+      npm_config_registry: https://registry.npmjs.org/
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: mbackschat/a12-kernel-bootstrap
+          ref: ${{ inputs.bootstrap-ref || github.sha }}
+          path: bootstrap
+          persist-credentials: false
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: mbackschat/a12-kernel-demo
+          ref: ${{ inputs.demo-ref || 'main' }}
+          path: demo
+          persist-credentials: false
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v6.3.0
+        id: java25
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: actions/setup-java@v6.3.0
+        id: java21
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+      - name: Bootstrap unit tests
+        working-directory: bootstrap
+        run: python -m unittest discover -s tests -v
+      - name: Build and verify the public release
+        working-directory: bootstrap
+        env:
+          JAVA21_HOME: ${{ steps.java21.outputs.path }}
+          JAVA25_HOME: ${{ steps.java25.outputs.path }}
+        run: ./bootstrap.sh
+      - name: Build and exercise the downstream demo
+        working-directory: bootstrap
+        env:
+          JAVA21_HOME: ${{ steps.java21.outputs.path }}
+        run: python scripts/check_consumer.py ../demo
+      - name: Preserve build logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: public-release-logs
+          path: ${{ env.A12_BOOTSTRAP_HOME }}/logs
+          retention-days: 7

@@ -1,0 +1,10 @@
+// PUBLIC-ONLY repositories (+ mavenLocal for from-source bootstrap artifacts). Bypasses any private registry in the global Gradle config.
+settingsEvaluated { settings ->
+    settings.pluginManagement {
+        repositories { mavenLocal(); gradlePluginPortal(); mavenCentral() }
+    }
+}
+allprojects {
+    buildscript { repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() } }
+    repositories { mavenLocal(); mavenCentral(); gradlePluginPortal() }
+}

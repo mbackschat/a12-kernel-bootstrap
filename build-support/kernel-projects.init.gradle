@@ -1,0 +1,17 @@
+// Inside the kernel build, resolve the kernel's own coordinates to its projects.
+// The metamodel jars come from Maven local and their POMs name kernel modules:
+// resolving those coordinates to projects prevents stale external kernel artifacts
+// from satisfying dependencies while the current release is being built.
+allprojects { current ->
+    current.configurations.configureEach {
+        resolutionStrategy.dependencySubstitution { substitutions ->
+            substitutions.all { substitution ->
+                def requested = substitution.requested
+                if (requested instanceof ModuleComponentSelector && requested.group == 'com.mgmtp.a12.kernel') {
+                    def local = current.rootProject.allprojects.find { it.name == requested.module }
+                    if (local != null) substitution.useTarget(substitutions.project(local.path))
+                }
+            }
+        }
+    }
+}

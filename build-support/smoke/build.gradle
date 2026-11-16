@@ -1,0 +1,9 @@
+plugins { id 'application' }
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+application { mainClass = 'ReleaseSmoke' }
+def kernelVersion = System.getenv('A12_KERNEL_VERSION')
+dependencies {
+    implementation "com.mgmtp.a12.kernel:kernel-md-facade:${kernelVersion}"
+    implementation "com.mgmtp.a12.kernel:kernel-md-workspace-converter:${kernelVersion}"
+    implementation "com.mgmtp.a12.dataservices.wcf:dataservices-wcf-api:${System.getenv('A12_WCF_API_VERSION')}"
+}

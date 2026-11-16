@@ -1,0 +1,10 @@
+gradle.projectsEvaluated {
+    rootProject.tasks.register('bootstrapConsumerClasspath') {
+        doLast {
+            def files = ['runtimeClasspath', 'typedAccessorRuntimeClasspath', 'typedAccessorGenerator']
+                .collectMany { name -> rootProject.configurations.getByName(name).files.toList() }
+                .unique().sort { it.path }
+            new File(System.getenv('A12_CONSUMER_CLASSPATH')).text = files.collect { it.path }.join('\n') + '\n'
+        }
+    }
+}
