@@ -52,4 +52,6 @@ The 2026.06-ext1 → ext2 migration followed these steps; expect the same shape 
 
 ## Forks
 
+Create each new fixes repository with `gh repo fork "mgm-tp/<repo>" --fork-name "<repo>-fixes" --clone=false --remote=false` under the `mbackschat` account, replacing `<repo>` with the upstream repository name. Do not create a standalone repository and push upstream history into it: that does not establish GitHub's fork relationship. Before pinning it, verify with `gh api "repos/mbackschat/<repo>-fixes" --jq '{fork, parent: .parent.full_name}'` that `fork` is `true` and `parent` is `mgm-tp/<repo>`. The flags preserve the existing sibling checkout and its remotes.
+
 When a public release export cannot build as published (a wrong coordinate, a missing model file), the correction goes into a public fork `mbackschat/<repo>-fixes` (EUPL, like upstream). Its branch `<release>-fixes` starts at mgm-tp's release commit and adds one commit per correction. The manifest's `forks` map names the fork's URL, and `repositories` pins the branch head; the bootstrap fetches that commit from the fork, even into a cache cloned from mgm-tp. Do not import distribution-only files into a fork. Record every fork commit and its reason in UPSTREAM-STATUS.md. Retire a fork as soon as mgm-tp publishes the fixes.
